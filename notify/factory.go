@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/grafana/alerting/receivers/feishu"
+
 	"github.com/prometheus/alertmanager/notify"
 
 	"github.com/grafana/alerting/receivers"
@@ -31,6 +33,7 @@ import (
 var receiverFactories = map[string]func(receivers.FactoryConfig) (NotificationChannel, error){
 	"prometheus-alertmanager": wrap(alertmanager.New),
 	"dingding":                wrap(dinding.New),
+	"feishu":                  wrap(feishu.New),
 	"discord":                 wrap(discord.New),
 	"email":                   wrap(email.New),
 	"googlechat":              wrap(googlechat.New),
