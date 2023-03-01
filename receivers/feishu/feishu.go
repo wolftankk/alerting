@@ -200,7 +200,7 @@ func (fs *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 }
 
 func (fs *Notifier) SendResolved() bool {
-	return !!fs.GetDisableResolveMessage()
+	return !fs.GetDisableResolveMessage()
 }
 
 type feishuTextContent struct {
