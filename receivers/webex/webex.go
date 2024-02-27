@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 // Notifier is responsible for sending alert notifications as webex messages.
@@ -20,27 +19,22 @@ type Notifier struct {
 	*receivers.Base
 	ns       receivers.WebhookSender
 	log      logging.Logger
-	images   images.ImageStore
-	tmpl     *template.Template
+	images   images.Provider
+	tmpl     *templates.Template
 	orgID    int64
 	settings Config
 }
 
-func New(factoryConfig receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(factoryConfig.Config.Settings, factoryConfig.Decrypt)
-	if err != nil {
-		return nil, err
-	}
-
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger, orgID int64) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(factoryConfig.Config),
-		orgID:    factoryConfig.Config.OrgID,
-		log:      factoryConfig.Logger,
-		ns:       factoryConfig.NotificationService,
-		images:   factoryConfig.ImageStore,
-		tmpl:     factoryConfig.Template,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		orgID:    orgID,
+		log:      logger,
+		ns:       sender,
+		images:   images,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 // webexMessage defines the JSON object to send to Webex endpoints.
@@ -53,7 +47,7 @@ type webexMessage struct {
 // Notify implements the Notifier interface.
 func (wn *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var tmplErr error
-	tmpl, data := template2.TmplText(ctx, wn.tmpl, as, wn.log, &tmplErr)
+	tmpl, data := templates.TmplText(ctx, wn.tmpl, as, wn.log, &tmplErr)
 
 	message, truncated := receivers.TruncateInBytes(tmpl(wn.settings.Message), 4096)
 	if truncated {

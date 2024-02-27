@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
+
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
@@ -31,27 +31,22 @@ var (
 // Notifier is responsible for sending alert notifications to Opsgenie.
 type Notifier struct {
 	*receivers.Base
-	tmpl     *template.Template
+	tmpl     *templates.Template
 	log      logging.Logger
 	ns       receivers.WebhookSender
-	images   images.ImageStore
+	images   images.Provider
 	settings Config
 }
 
-// New is the constructor for the Opsgenie notifier
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings, fc.Decrypt)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		tmpl:     fc.Template,
-		log:      fc.Logger,
-		ns:       fc.NotificationService,
-		images:   fc.ImageStore,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		log:      logger,
+		ns:       sender,
+		images:   images,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 // Notify sends an alert notification to Opsgenie
@@ -169,7 +164,7 @@ func (on *Notifier) buildOpsgenieMessage(ctx context.Context, alerts model.Alert
 			as...)
 
 		if len(imageUrls) != 0 {
-			details["image_urls"] = imageUrls
+			details["image_urls"] = strings.Join(imageUrls, ", ")
 		}
 	}
 
@@ -181,6 +176,44 @@ func (on *Notifier) buildOpsgenieMessage(ctx context.Context, alerts model.Alert
 	}
 	sort.Strings(tags)
 
+	responders := make([]opsGenieCreateMessageResponder, 0, len(on.settings.Responders))
+	for idx, r := range on.settings.Responders {
+		responder := opsGenieCreateMessageResponder{
+			ID:       tmpl(r.ID),
+			Name:     tmpl(r.Name),
+			Username: tmpl(r.Username),
+			Type:     tmpl(r.Type),
+		}
+
+		if responder == (opsGenieCreateMessageResponder{}) {
+			on.log.Warn("templates in the responder were expanded to empty responder. Skipping it", "idx", idx)
+			// Filter out empty responders. This is useful if you want to fill
+			// responders dynamically from alert's common labels.
+			continue
+		}
+
+		if responder.Type == "teams" {
+			teams := strings.Split(responder.Name, ",")
+			teamResponders := make([]opsGenieCreateMessageResponder, 0, len(teams))
+			for _, team := range teams {
+				if team == "" {
+					continue
+				}
+				newResponder := opsGenieCreateMessageResponder{
+					Name: team,
+					Type: "team",
+				}
+				teamResponders = append(teamResponders, newResponder)
+			}
+			if len(teamResponders) == 0 {
+				on.log.Warn("teams responder were expanded to 0 team responders. Skipping it", "idx", idx)
+			}
+			responders = append(responders, teamResponders...)
+			continue
+		}
+		responders = append(responders, responder)
+	}
+
 	result := opsGenieCreateMessage{
 		Alias:       key.Hash(),
 		Description: description,
@@ -189,6 +222,7 @@ func (on *Notifier) buildOpsgenieMessage(ctx context.Context, alerts model.Alert
 		Message:     message,
 		Details:     details,
 		Priority:    priority,
+		Responders:  responders,
 	}
 
 	apiURL = tmpl(on.settings.APIUrl)

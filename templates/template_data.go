@@ -9,19 +9,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
-	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/models"
 )
 
+type Template = template.Template
+type KV = template.KV
+type Data = template.Data
+
+var FromGlobs = template.FromGlobs
+
 type ExtendedAlert struct {
 	Status        string             `json:"status"`
-	Labels        template.KV        `json:"labels"`
-	Annotations   template.KV        `json:"annotations"`
+	Labels        KV                 `json:"labels"`
+	Annotations   KV                 `json:"annotations"`
 	StartsAt      time.Time          `json:"startsAt"`
 	EndsAt        time.Time          `json:"endsAt"`
 	GeneratorURL  string             `json:"generatorURL"`
@@ -42,9 +50,9 @@ type ExtendedData struct {
 	Status   string         `json:"status"`
 	Alerts   ExtendedAlerts `json:"alerts"`
 
-	GroupLabels       template.KV `json:"groupLabels"`
-	CommonLabels      template.KV `json:"commonLabels"`
-	CommonAnnotations template.KV `json:"commonAnnotations"`
+	GroupLabels       KV `json:"groupLabels"`
+	CommonLabels      KV `json:"commonLabels"`
+	CommonAnnotations KV `json:"commonAnnotations"`
 
 	ExternalURL string `json:"externalURL"`
 }
@@ -58,7 +66,7 @@ func removePrivateItems(kv template.KV) template.KV {
 	return kv
 }
 
-func extendAlert(alert template.Alert, externalURL string, logger logging.Logger) *ExtendedAlert {
+func extendAlert(alert template.Alert, externalURL string, logger log.Logger) *ExtendedAlert {
 	// remove "private" annotations & labels so they don't show up in the template
 	extended := &ExtendedAlert{
 		Status:       alert.Status,
@@ -76,10 +84,22 @@ func extendAlert(alert template.Alert, externalURL string, logger logging.Logger
 	}
 	u, err := url.Parse(externalURL)
 	if err != nil {
-		logger.Debug("failed to parse external URL while extending template data", "url", externalURL, "error", err.Error())
+		level.Debug(logger).Log("msg", "failed to parse external URL while extending template data", "url", externalURL, "error", err.Error())
 		return extended
 	}
 	externalPath := u.Path
+
+	generatorURL, err := url.Parse(extended.GeneratorURL)
+	if err != nil {
+		level.Debug(logger).Log("msg", "failed to parse generator URL while extending template data", "url", extended.GeneratorURL, "error", err.Error())
+		return extended
+	}
+
+	orgID := alert.Annotations[models.OrgIDAnnotation]
+	if len(orgID) > 0 {
+		extended.GeneratorURL = setOrgIDQueryParam(generatorURL, orgID)
+	}
+
 	dashboardUID := alert.Annotations[models.DashboardUIDAnnotation]
 	if len(dashboardUID) > 0 {
 		u.Path = path.Join(externalPath, "/d/", dashboardUID)
@@ -89,31 +109,21 @@ func extendAlert(alert template.Alert, externalURL string, logger logging.Logger
 			u.RawQuery = "viewPanel=" + panelID
 			extended.PanelURL = u.String()
 		}
-
-		generatorURL, err := url.Parse(extended.GeneratorURL)
-		if err != nil {
-			logger.Debug("failed to parse generator URL while extending template data", "url", extended.GeneratorURL, "err", err.Error())
-			return extended
-		}
-
 		dashboardURL, err := url.Parse(extended.DashboardURL)
 		if err != nil {
-			logger.Debug("failed to parse dashboard URL while extending template data", "url", extended.DashboardURL, "err", err.Error())
+			level.Debug(logger).Log("msg", "failed to parse dashboard URL while extending template data", "url", extended.DashboardURL, "error", err.Error())
 			return extended
 		}
-
-		orgID := alert.Annotations[models.OrgIDAnnotation]
 		if len(orgID) > 0 {
 			extended.DashboardURL = setOrgIDQueryParam(dashboardURL, orgID)
 			extended.PanelURL = setOrgIDQueryParam(u, orgID)
-			extended.GeneratorURL = setOrgIDQueryParam(generatorURL, orgID)
 		}
 	}
 
 	if alert.Annotations != nil {
 		if s, ok := alert.Annotations[models.ValuesAnnotation]; ok {
 			if err := json.Unmarshal([]byte(s), &extended.Values); err != nil {
-				logger.Warn("failed to unmarshal values annotation", "error", err)
+				level.Warn(logger).Log("msg", "failed to unmarshal values annotation", "error", err.Error())
 			}
 		}
 
@@ -137,9 +147,11 @@ func extendAlert(alert template.Alert, externalURL string, logger logging.Logger
 	}
 
 	u.RawQuery = query.Encode()
-
-	extended.SilenceURL = u.String()
-
+	if len(orgID) > 0 {
+		extended.SilenceURL = setOrgIDQueryParam(u, orgID)
+	} else {
+		extended.SilenceURL = u.String()
+	}
 	return extended
 }
 
@@ -151,8 +163,8 @@ func setOrgIDQueryParam(url *url.URL, orgID string) string {
 	return url.String()
 }
 
-func ExtendData(data *template.Data, logger logging.Logger) *ExtendedData {
-	alerts := []ExtendedAlert{}
+func ExtendData(data *Data, logger log.Logger) *ExtendedData {
+	alerts := make([]ExtendedAlert, 0, len(data.Alerts))
 
 	for _, alert := range data.Alerts {
 		extendedAlert := extendAlert(alert, data.ExternalURL, logger)
@@ -172,7 +184,7 @@ func ExtendData(data *template.Data, logger logging.Logger) *ExtendedData {
 	return extended
 }
 
-func TmplText(ctx context.Context, tmpl *template.Template, alerts []*types.Alert, l logging.Logger, tmplErr *error) (func(string) string, *ExtendedData) {
+func TmplText(ctx context.Context, tmpl *Template, alerts []*types.Alert, l log.Logger, tmplErr *error) (func(string) string, *ExtendedData) {
 	promTmplData := notify.GetTemplateData(ctx, tmpl, alerts, l)
 	data := ExtendData(promTmplData, l)
 

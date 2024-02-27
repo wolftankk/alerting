@@ -11,14 +11,14 @@ import (
 	"strings"
 
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
+
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 const (
@@ -40,27 +40,23 @@ var (
 // alert notifications to Pushover
 type Notifier struct {
 	*receivers.Base
-	tmpl     *template.Template
+	tmpl     *templates.Template
 	log      logging.Logger
-	images   images.ImageStore
+	images   images.Provider
 	ns       receivers.WebhookSender
 	settings Config
 }
 
 // New is the constructor for the pushover notifier
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings, fc.Decrypt)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		tmpl:     fc.Template,
-		log:      fc.Logger,
-		images:   fc.ImageStore,
-		ns:       fc.NotificationService,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		log:      logger,
+		ns:       sender,
+		images:   images,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 // Notify sends an alert notification to Slack.
@@ -107,7 +103,7 @@ func (pn *Notifier) genPushoverBody(ctx context.Context, as ...*types.Alert) (ma
 	}
 
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, pn.tmpl, as, pn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, pn.tmpl, as, pn.log, &tmplErr)
 
 	if err := w.WriteField("user", tmpl(pn.settings.UserKey)); err != nil {
 		return nil, b, fmt.Errorf("failed to write the user: %w", err)
@@ -179,7 +175,11 @@ func (pn *Notifier) genPushoverBody(ctx context.Context, as ...*types.Alert) (ma
 		return nil, b, fmt.Errorf("failed write the message: %w", err)
 	}
 
-	pn.writeImageParts(ctx, w, as...)
+	if pn.settings.Upload {
+		pn.writeImageParts(ctx, w, as...)
+	} else {
+		pn.log.Debug("skip uploading image because of the configuration")
+	}
 
 	var sound string
 	if status == model.AlertResolved {
@@ -215,7 +215,7 @@ func (pn *Notifier) genPushoverBody(ctx context.Context, as ...*types.Alert) (ma
 func (pn *Notifier) writeImageParts(ctx context.Context, w *multipart.Writer, as ...*types.Alert) {
 	// Pushover supports at most one image attachment with a maximum size of pushoverMaxFileSize.
 	// If the image is larger than pushoverMaxFileSize then return an error.
-	_ = images.WithStoredImages(ctx, pn.log, pn.images, func(index int, image images.Image) error {
+	err := images.WithStoredImages(ctx, pn.log, pn.images, func(index int, image images.Image) error {
 		f, err := os.Open(image.Path)
 		if err != nil {
 			return fmt.Errorf("failed to open the image: %w", err)
@@ -246,4 +246,7 @@ func (pn *Notifier) writeImageParts(ctx context.Context, w *multipart.Writer, as
 
 		return images.ErrImagesDone
 	}, as...)
+	if err != nil {
+		pn.log.Error("failed to fetch image for the notification", "error", err)
+	}
 }

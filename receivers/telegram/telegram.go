@@ -9,13 +9,12 @@ import (
 	"os"
 
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 var (
@@ -31,26 +30,22 @@ const telegramMaxMessageLenRunes = 4096
 type Notifier struct {
 	*receivers.Base
 	log      logging.Logger
-	images   images.ImageStore
+	images   images.Provider
 	ns       receivers.WebhookSender
-	tmpl     *template.Template
+	tmpl     *templates.Template
 	settings Config
 }
 
 // New is the constructor for the Telegram notifier
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings, fc.Decrypt)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		tmpl:     fc.Template,
-		log:      fc.Logger,
-		images:   fc.ImageStore,
-		ns:       fc.NotificationService,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		tmpl:     template,
+		log:      logger,
+		images:   images,
+		ns:       sender,
+		settings: cfg,
+	}
 }
 
 // Notify send an alert notification to Telegram.
@@ -120,7 +115,7 @@ func (tn *Notifier) buildTelegramMessage(ctx context.Context, as []*types.Alert)
 		}
 	}()
 
-	tmpl, _ := template2.TmplText(ctx, tn.tmpl, as, tn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, tn.tmpl, as, tn.log, &tmplErr)
 	// Telegram supports 4096 chars max
 	messageText, truncated := receivers.TruncateInRunes(tmpl(tn.settings.Message), telegramMaxMessageLenRunes)
 	if truncated {
@@ -133,8 +128,17 @@ func (tn *Notifier) buildTelegramMessage(ctx context.Context, as []*types.Alert)
 
 	m := make(map[string]string)
 	m["text"] = messageText
+	if tn.settings.MessageThreadID != "" {
+		m["message_thread_id"] = tn.settings.MessageThreadID
+	}
 	if tn.settings.ParseMode != "" {
 		m["parse_mode"] = tn.settings.ParseMode
+	}
+	if tn.settings.DisableWebPagePreview {
+		m["disable_web_page_preview"] = "true"
+	}
+	if tn.settings.ProtectContent {
+		m["protect_content"] = "true"
 	}
 	if tn.settings.DisableNotifications {
 		m["disable_notification"] = "true"

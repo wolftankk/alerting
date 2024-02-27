@@ -7,13 +7,12 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 // Notifier is responsible for sending
@@ -22,8 +21,8 @@ type Notifier struct {
 	*receivers.Base
 	log        logging.Logger
 	ns         receivers.WebhookSender
-	images     images.ImageStore
-	tmpl       *template.Template
+	images     images.Provider
+	tmpl       *templates.Template
 	settings   Config
 	appVersion string
 }
@@ -33,20 +32,16 @@ var (
 	timeNow = time.Now
 )
 
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger, appVersion string) *Notifier {
 	return &Notifier{
-		Base:       receivers.NewBase(fc.Config),
-		log:        fc.Logger,
-		ns:         fc.NotificationService,
-		images:     fc.ImageStore,
-		tmpl:       fc.Template,
-		settings:   settings,
-		appVersion: fc.GrafanaBuildVersion,
-	}, nil
+		Base:       receivers.NewBase(meta),
+		log:        logger,
+		ns:         sender,
+		images:     images,
+		tmpl:       template,
+		settings:   cfg,
+		appVersion: appVersion,
+	}
 }
 
 // Notify send an alert notification to Google Chat.
@@ -54,7 +49,7 @@ func (gcn *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, erro
 	gcn.log.Debug("executing Google Chat notification")
 
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, gcn.tmpl, as, gcn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, gcn.tmpl, as, gcn.log, &tmplErr)
 
 	var widgets []widget
 
@@ -196,7 +191,7 @@ func (gcn *Notifier) buildScreenshotCard(ctx context.Context, alerts []*types.Al
 }
 
 // Structs used to build a custom Google Hangouts Chat message card.
-// See: https://developers.google.com/hangouts/chat/reference/message-formats/cards
+// https://developers.google.com/chat/api/guides/message-formats/cards
 type outerStruct struct {
 	PreviewText  string `json:"previewText"`
 	FallbackText string `json:"fallbackText"`

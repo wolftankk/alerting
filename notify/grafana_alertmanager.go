@@ -5,24 +5,24 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
+	"path/filepath"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/alerting/cluster"
 	amv2 "github.com/prometheus/alertmanager/api/v2/models"
-	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/inhibit"
+	"github.com/prometheus/alertmanager/matchers/compat"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/provider/mem"
 	"github.com/prometheus/alertmanager/silence"
-	pb "github.com/prometheus/alertmanager/silence/silencepb"
 	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/timeinterval"
 	"github.com/prometheus/alertmanager/types"
@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/models"
+	"github.com/grafana/alerting/templates"
 )
 
 const (
@@ -41,21 +42,10 @@ const (
 )
 
 func init() {
-	silence.ValidateMatcher = func(m *pb.Matcher) error {
-		switch m.Type {
-		case pb.Matcher_EQUAL, pb.Matcher_NOT_EQUAL:
-			if !model.LabelValue(m.Pattern).IsValid() {
-				return fmt.Errorf("invalid label value %q", m.Pattern)
-			}
-		case pb.Matcher_REGEXP, pb.Matcher_NOT_REGEXP:
-			if _, err := regexp.Compile(m.Pattern); err != nil {
-				return fmt.Errorf("invalid regular expression %q: %s", m.Pattern, err)
-			}
-		default:
-			return fmt.Errorf("unknown matcher type %q", m.Type)
-		}
-		return nil
-	}
+	// This initializes the compat package in fallback mode. It parses first using the UTF-8 parser
+	// and then fallsback to the classic parser on error. UTF-8 is permitted in label names.
+	// This should be removed when the compat package is removed from Alertmanager.
+	compat.InitFromFlags(log.NewNopLogger(), featurecontrol.NoopFlags{})
 }
 
 type ClusterPeer interface {
@@ -87,20 +77,29 @@ type GrafanaAlertmanager struct {
 	inhibitor       *inhibit.Inhibitor
 	silencer        *silence.Silencer
 	silences        *silence.Silences
-	templates       *Template
 
-	// muteTimes is a map where the key is the name of the mute_time_interval
-	// and the value represents all configured time_interval(s)
-	muteTimes map[string][]timeinterval.TimeInterval
+	// template is the current parsed template used for notification rendering.
+	template *templates.Template
+
+	// timeIntervals is the set of all time_intervals and mute_time_intervals from
+	// the configuration.
+	timeIntervals map[string][]timeinterval.TimeInterval
 
 	stageMetrics      *notify.Metrics
 	dispatcherMetrics *dispatch.DispatcherMetrics
 
-	reloadConfigMtx              sync.RWMutex
-	configHash                   [16]byte
-	config                       []byte
-	receivers                    []*notify.Receiver
-	buildReceiverIntegrationFunc func(next *GrafanaReceiver, tmpl *Template) (Notifier, error)
+	reloadConfigMtx sync.RWMutex
+	configHash      [16]byte
+	config          []byte
+	receivers       []*notify.Receiver
+
+	// buildReceiverIntegrationsFunc builds the integrations for a receiver based on its APIReceiver configuration and the current parsed template.
+	buildReceiverIntegrationsFunc func(next *APIReceiver, tmpl *templates.Template) ([]*Integration, error)
+	externalURL                   string
+	workingDirectory              string
+
+	// templates contains the filenames (not full paths) of the persisted templates that were used to construct the current parsed template.
+	templates []string
 }
 
 // State represents any of the two 'states' of the alertmanager. Notification log or Silences.
@@ -123,30 +122,30 @@ type MaintenanceOptions interface {
 }
 
 var NewIntegration = notify.NewIntegration
-var FromGlobs = template.FromGlobs
 
-type Template = template.Template
 type InhibitRule = config.InhibitRule
 type MuteTimeInterval = config.MuteTimeInterval
-type TimeInterval = timeinterval.TimeInterval
+type TimeInterval = config.TimeInterval
 type Route = config.Route
 type Integration = notify.Integration
 type DispatcherLimits = dispatch.Limits
 type Notifier = notify.Notifier
 
-//nolint:golint
+//nolint:revive
 type NotifyReceiver = notify.Receiver
 
 // Configuration is an interface for accessing Alertmanager configuration.
 type Configuration interface {
 	DispatcherLimits() DispatcherLimits
 	InhibitRules() []InhibitRule
+	TimeIntervals() []TimeInterval
+	// Deprecated: MuteTimeIntervals are deprecated in Alertmanager and will be removed in future versions.
 	MuteTimeIntervals() []MuteTimeInterval
-	ReceiverIntegrations() (map[string][]*Integration, error)
-	BuildReceiverIntegrationsFunc() func(next *GrafanaReceiver, tmpl *Template) (Notifier, error)
+	Receivers() []*APIReceiver
+	BuildReceiverIntegrationsFunc() func(next *APIReceiver, tmpl *templates.Template) ([]*Integration, error)
 
 	RoutingTree() *Route
-	Templates() *Template
+	Templates() []string
 
 	Hash() [16]byte
 	Raw() []byte
@@ -154,6 +153,7 @@ type Configuration interface {
 
 type GrafanaAlertmanagerConfig struct {
 	WorkingDirectory   string
+	ExternalURL        string
 	AlertStoreCallback mem.AlertStoreCallback
 	PeerTimeout        time.Duration
 
@@ -180,12 +180,14 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 		stopc:             make(chan struct{}),
 		logger:            log.With(logger, "component", "alertmanager", tenantKey, tenantID),
 		marker:            types.NewMarker(m.Registerer),
-		stageMetrics:      notify.NewMetrics(m.Registerer),
+		stageMetrics:      notify.NewMetrics(m.Registerer, featurecontrol.NoopFlags{}),
 		dispatcherMetrics: dispatch.NewDispatcherMetrics(false, m.Registerer),
 		peer:              peer,
 		peerTimeout:       config.PeerTimeout,
 		Metrics:           m,
 		tenantID:          tenantID,
+		externalURL:       config.ExternalURL,
+		workingDirectory:  config.WorkingDirectory,
 	}
 
 	if err := config.Validate(); err != nil {
@@ -223,7 +225,7 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 
 	am.wg.Add(1)
 	go func() {
-		am.notificationLog.Maintenance(config.Nflog.MaintenanceFrequency(), config.Silences.Filepath(), am.stopc, func() (int64, error) {
+		am.notificationLog.Maintenance(config.Nflog.MaintenanceFrequency(), config.Nflog.Filepath(), am.stopc, func() (int64, error) {
 			if _, err := am.notificationLog.GC(); err != nil {
 				level.Error(am.logger).Log("notification log garbage collection", "err", err)
 			}
@@ -296,6 +298,14 @@ func (am *GrafanaAlertmanager) GetReceivers() []*NotifyReceiver {
 	return am.receivers
 }
 
+func (am *GrafanaAlertmanager) ExternalURL() string {
+	return am.externalURL
+}
+
+func (am *GrafanaAlertmanager) WorkingDirectory() string {
+	return am.workingDirectory
+}
+
 // ConfigHash returns the hash of the current running configuration.
 // It is not safe to call without a lock.
 func (am *GrafanaAlertmanager) ConfigHash() [16]byte {
@@ -315,12 +325,12 @@ func (am *GrafanaAlertmanager) WithLock(fn func()) {
 }
 
 // TemplateFromPaths returns a set of *Templates based on the paths given.
-func (am *GrafanaAlertmanager) TemplateFromPaths(u string, paths ...string) (*Template, error) {
-	tmpl, err := template.FromGlobs(paths)
+func (am *GrafanaAlertmanager) TemplateFromPaths(paths []string, options ...template.Option) (*templates.Template, error) {
+	tmpl, err := templates.FromGlobs(paths, options...)
 	if err != nil {
 		return nil, err
 	}
-	externalURL, err := url.Parse(u)
+	externalURL, err := url.Parse(am.ExternalURL())
 	if err != nil {
 		return nil, err
 	}
@@ -328,8 +338,11 @@ func (am *GrafanaAlertmanager) TemplateFromPaths(u string, paths ...string) (*Te
 	return tmpl, nil
 }
 
-func (am *GrafanaAlertmanager) buildMuteTimesMap(muteTimeIntervals []config.MuteTimeInterval) map[string][]timeinterval.TimeInterval {
-	muteTimes := make(map[string][]timeinterval.TimeInterval, len(muteTimeIntervals))
+func (am *GrafanaAlertmanager) buildTimeIntervals(timeIntervals []config.TimeInterval, muteTimeIntervals []config.MuteTimeInterval) map[string][]timeinterval.TimeInterval {
+	muteTimes := make(map[string][]timeinterval.TimeInterval, len(timeIntervals)+len(muteTimeIntervals))
+	for _, ti := range timeIntervals {
+		muteTimes[ti.Name] = ti.TimeIntervals
+	}
 	for _, ti := range muteTimeIntervals {
 		muteTimes[ti.Name] = ti.TimeIntervals
 	}
@@ -339,10 +352,29 @@ func (am *GrafanaAlertmanager) buildMuteTimesMap(muteTimeIntervals []config.Mute
 // ApplyConfig applies a new configuration by re-initializing all components using the configuration provided.
 // It is not safe to call concurrently.
 func (am *GrafanaAlertmanager) ApplyConfig(cfg Configuration) (err error) {
-	// Finally, build the integrations map using the receiver configuration and templates.
-	integrationsMap, err := cfg.ReceiverIntegrations()
+	am.templates = cfg.Templates()
+
+	// Create the parsed template using the template paths.
+	paths := make([]string, 0)
+	for _, name := range am.templates {
+		paths = append(paths, filepath.Join(am.workingDirectory, name))
+	}
+
+	tmpl, err := am.TemplateFromPaths(paths)
 	if err != nil {
-		return fmt.Errorf("failed to build integration map: %w", err)
+		return err
+	}
+	am.template = tmpl
+
+	// Finally, build the integrations map using the receiver configuration and templates.
+	apiReceivers := cfg.Receivers()
+	integrationsMap := make(map[string][]*Integration, len(apiReceivers))
+	for _, apiReceiver := range apiReceivers {
+		integrations, err := cfg.BuildReceiverIntegrationsFunc()(apiReceiver, tmpl)
+		if err != nil {
+			return err
+		}
+		integrationsMap[apiReceiver.Name] = integrations
 	}
 
 	// Now, let's put together our notification pipeline
@@ -356,12 +388,12 @@ func (am *GrafanaAlertmanager) ApplyConfig(cfg Configuration) (err error) {
 	}
 
 	am.inhibitor = inhibit.NewInhibitor(am.alerts, cfg.InhibitRules(), am.marker, am.logger)
-	am.muteTimes = am.buildMuteTimesMap(cfg.MuteTimeIntervals())
+	am.timeIntervals = am.buildTimeIntervals(cfg.TimeIntervals(), cfg.MuteTimeIntervals())
 	am.silencer = silence.NewSilencer(am.silences, am.marker, am.logger)
 
 	meshStage := notify.NewGossipSettleStage(am.peer)
 	inhibitionStage := notify.NewMuteStage(am.inhibitor)
-	timeMuteStage := notify.NewTimeMuteStage(am.muteTimes)
+	timeMuteStage := notify.NewTimeMuteStage(timeinterval.NewIntervener(am.timeIntervals))
 	silencingStage := notify.NewMuteStage(am.silencer)
 
 	am.route = dispatch.NewRoute(cfg.RoutingTree(), nil)
@@ -377,8 +409,12 @@ func (am *GrafanaAlertmanager) ApplyConfig(cfg Configuration) (err error) {
 
 		receivers = append(receivers, notify.NewReceiver(name, isActive, integrationsMap[name]))
 	}
+
+	am.setReceiverMetrics(receivers, len(activeReceivers))
+	am.setInhibitionRulesMetrics(cfg.InhibitRules())
+
 	am.receivers = receivers
-	am.buildReceiverIntegrationFunc = cfg.BuildReceiverIntegrationsFunc()
+	am.buildReceiverIntegrationsFunc = cfg.BuildReceiverIntegrationsFunc()
 
 	am.wg.Add(1)
 	go func() {
@@ -394,9 +430,28 @@ func (am *GrafanaAlertmanager) ApplyConfig(cfg Configuration) (err error) {
 
 	am.configHash = cfg.Hash()
 	am.config = cfg.Raw()
-	am.templates = cfg.Templates()
 
 	return nil
+}
+
+func (am *GrafanaAlertmanager) setInhibitionRulesMetrics(r []InhibitRule) {
+	am.Metrics.configuredInhibitionRules.WithLabelValues(am.tenantString()).Set(float64(len(r)))
+}
+
+func (am *GrafanaAlertmanager) setReceiverMetrics(receivers []*notify.Receiver, countActiveReceivers int) {
+	am.Metrics.configuredReceivers.WithLabelValues(am.tenantString(), ActiveStateLabelValue).Set(float64(countActiveReceivers))
+	am.Metrics.configuredReceivers.WithLabelValues(am.tenantString(), InactiveStateLabelValue).Set(float64(len(receivers) - countActiveReceivers))
+
+	integrationsByType := make(map[string]int, len(receivers))
+	for _, r := range receivers {
+		for _, i := range r.Integrations() {
+			integrationsByType[i.Name()]++
+		}
+	}
+
+	for t, count := range integrationsByType {
+		am.Metrics.configuredIntegrations.WithLabelValues(am.tenantString(), t).Set(float64(count))
+	}
 }
 
 // PutAlerts receives the alerts and then sends them through the corresponding route based on whenever the alert has a receiver embedded or not
@@ -452,7 +507,7 @@ func (am *GrafanaAlertmanager) PutAlerts(postableAlerts amv2.PostableAlerts) err
 			am.Metrics.Resolved().Inc()
 		}
 
-		if err := validateAlert(alert); err != nil {
+		if err := alert.Validate(); err != nil {
 			if validationErr == nil {
 				validationErr = &AlertValidationError{}
 			}
@@ -462,6 +517,14 @@ func (am *GrafanaAlertmanager) PutAlerts(postableAlerts amv2.PostableAlerts) err
 			continue
 		}
 
+		level.Debug(am.logger).Log("msg",
+			"Putting alert",
+			"alert",
+			alert,
+			"starts_at",
+			alert.StartsAt,
+			"ends_at",
+			alert.EndsAt)
 		alerts = append(alerts, alert)
 	}
 
@@ -474,51 +537,6 @@ func (am *GrafanaAlertmanager) PutAlerts(postableAlerts amv2.PostableAlerts) err
 		return validationErr
 	}
 	return nil
-}
-
-// validateAlert is a.Validate() while additionally allowing
-// space for label and annotation names.
-func validateAlert(a *types.Alert) error {
-	if a.StartsAt.IsZero() {
-		return fmt.Errorf("start time missing")
-	}
-	if !a.EndsAt.IsZero() && a.EndsAt.Before(a.StartsAt) {
-		return fmt.Errorf("start time must be before end time")
-	}
-	if err := validateLabelSet(a.Labels); err != nil {
-		return fmt.Errorf("invalid label set: %s", err)
-	}
-	if len(a.Labels) == 0 {
-		return fmt.Errorf("at least one label pair required")
-	}
-	if err := validateLabelSet(a.Annotations); err != nil {
-		return fmt.Errorf("invalid annotations: %s", err)
-	}
-	return nil
-}
-
-// validateLabelSet is ls.Validate() while additionally allowing
-// space for label names.
-func validateLabelSet(ls model.LabelSet) error {
-	for ln, lv := range ls {
-		if !isValidLabelName(ln) {
-			return fmt.Errorf("invalid name %q", ln)
-		}
-		if !lv.IsValid() {
-			return fmt.Errorf("invalid value %q", lv)
-		}
-	}
-	return nil
-}
-
-// isValidLabelName is ln.IsValid() without restrictions other than it can not be empty.
-// The regex for Prometheus data model is ^[a-zA-Z_][a-zA-Z0-9_]*$.
-func isValidLabelName(ln model.LabelName) bool {
-	if len(ln) == 0 {
-		return false
-	}
-
-	return utf8.ValidString(string(ln))
 }
 
 // AlertValidationError is the error capturing the validation errors
@@ -583,16 +601,16 @@ func (am *GrafanaAlertmanager) timeoutFunc(d time.Duration) time.Duration {
 	return d + am.waitFunc()
 }
 
-func (am *GrafanaAlertmanager) getTemplate() (*template.Template, error) {
+func (am *GrafanaAlertmanager) getTemplate() (*templates.Template, error) {
 	am.reloadConfigMtx.RLock()
 	defer am.reloadConfigMtx.RUnlock()
 	if !am.ready() {
 		return nil, errors.New("alertmanager is not initialized")
 	}
 
-	return am.templates, nil
+	return am.template, nil
 }
 
-func (am *GrafanaAlertmanager) buildReceiverIntegration(next *GrafanaReceiver, tmpl *template.Template) (Notifier, error) {
-	return am.buildReceiverIntegrationFunc(next, tmpl)
+func (am *GrafanaAlertmanager) tenantString() string {
+	return fmt.Sprintf("%d", am.tenantID)
 }

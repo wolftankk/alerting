@@ -19,7 +19,7 @@ import (
 
 	amConfig "github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
+
 	"github.com/prometheus/alertmanager/types"
 
 	"github.com/grafana/alerting/images"
@@ -66,8 +66,8 @@ const slackMaxTitleLenRunes = 1024
 type Notifier struct {
 	*receivers.Base
 	log           logging.Logger
-	tmpl          *template.Template
-	images        images.ImageStore
+	tmpl          *templates.Template
+	images        images.Provider
 	webhookSender receivers.WebhookSender
 	sendFn        sendFunc
 	settings      Config
@@ -90,23 +90,18 @@ func uploadURL(s Config) (string, error) {
 	return u.String(), nil
 }
 
-func New(factoryConfig receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(factoryConfig.Config.Settings, factoryConfig.Decrypt)
-	if err != nil {
-		return nil, err
-	}
-
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger, appVersion string) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(factoryConfig.Config),
-		settings: settings,
+		Base:     receivers.NewBase(meta),
+		settings: cfg,
 
-		images:        factoryConfig.ImageStore,
-		webhookSender: factoryConfig.NotificationService,
+		images:        images,
+		webhookSender: sender,
 		sendFn:        sendSlackRequest,
-		log:           factoryConfig.Logger,
-		tmpl:          factoryConfig.Template,
-		appVersion:    factoryConfig.GrafanaBuildVersion,
-	}, nil
+		log:           logger,
+		tmpl:          template,
+		appVersion:    appVersion,
+	}
 }
 
 // slackMessage is the slackMessage for sending a slack notification.
@@ -205,11 +200,11 @@ var sendSlackRequest = func(ctx context.Context, req *http.Request, logger loggi
 	}
 
 	content := resp.Header.Get("Content-Type")
-	// If the response is text/html it could be the response to an incoming webhook
-	if strings.HasPrefix(content, "text/html") {
-		return handleSlackIncomingWebhookResponse(resp, logger)
+	if strings.HasPrefix(content, "application/json") {
+		return handleSlackJSONResponse(resp, logger)
 	}
-	return handleSlackJSONResponse(resp, logger)
+	// If the response is not JSON it could be the response to an incoming webhook
+	return handleSlackIncomingWebhookResponse(resp, logger)
 }
 
 func handleSlackIncomingWebhookResponse(resp *http.Response, logger logging.Logger) (string, error) {
@@ -288,11 +283,29 @@ func handleSlackJSONResponse(resp *http.Response, logger logging.Logger) (string
 	return result.Ts, nil
 }
 
+func (sn *Notifier) commonAlertGeneratorURL(_ context.Context, alerts []*types.Alert) bool {
+	if len(alerts[0].GeneratorURL) == 0 {
+		return false
+	}
+	firstURL := alerts[0].GeneratorURL
+	for _, a := range alerts {
+		if a.GeneratorURL != firstURL {
+			return false
+		}
+	}
+	return true
+}
+
 func (sn *Notifier) createSlackMessage(ctx context.Context, alerts []*types.Alert) (*slackMessage, error) {
 	var tmplErr error
 	tmpl, _ := templates.TmplText(ctx, sn.tmpl, alerts, sn.log, &tmplErr)
 
 	ruleURL := receivers.JoinURLPath(sn.tmpl.ExternalURL.String(), "/alerting/list", sn.log)
+
+	// If all alerts have the same GeneratorURL, use that.
+	if sn.commonAlertGeneratorURL(ctx, alerts) {
+		ruleURL = alerts[0].GeneratorURL
+	}
 
 	title, truncated := receivers.TruncateInRunes(tmpl(sn.settings.Title), slackMaxTitleLenRunes)
 	if truncated {

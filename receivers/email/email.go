@@ -7,13 +7,12 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 // Notifier is responsible for sending
@@ -22,30 +21,26 @@ type Notifier struct {
 	*receivers.Base
 	log      logging.Logger
 	ns       receivers.EmailSender
-	images   images.ImageStore
-	tmpl     *template.Template
+	images   images.Provider
+	tmpl     *templates.Template
 	settings Config
 }
 
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.EmailSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		log:      fc.Logger,
-		ns:       fc.NotificationService,
-		images:   fc.ImageStore,
-		tmpl:     fc.Template,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		log:      logger,
+		ns:       sender,
+		images:   images,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 // Notify sends the alert notification.
 func (en *Notifier) Notify(ctx context.Context, alerts ...*types.Alert) (bool, error) {
 	var tmplErr error
-	tmpl, data := template2.TmplText(ctx, en.tmpl, alerts, en.log, &tmplErr)
+	tmpl, data := templates.TmplText(ctx, en.tmpl, alerts, en.log, &tmplErr)
 
 	subject := tmpl(en.settings.Subject)
 	alertPageURL := en.tmpl.ExternalURL.String()

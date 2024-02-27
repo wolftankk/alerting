@@ -6,14 +6,13 @@ import (
 	"net/url"
 	"path"
 
-	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 var (
@@ -26,25 +25,21 @@ var (
 type Notifier struct {
 	*receivers.Base
 	log      logging.Logger
-	images   images.ImageStore
+	images   images.Provider
 	ns       receivers.WebhookSender
-	tmpl     *template.Template
+	tmpl     *templates.Template
 	settings Config
 }
 
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings, fc.Decrypt)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		log:      fc.Logger,
-		images:   fc.ImageStore,
-		ns:       fc.NotificationService,
-		tmpl:     fc.Template,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		log:      logger,
+		images:   images,
+		ns:       sender,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 // Notify send an alert notification to Threema
@@ -80,7 +75,7 @@ func (tn *Notifier) SendResolved() bool {
 
 func (tn *Notifier) buildMessage(ctx context.Context, as ...*types.Alert) string {
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, tn.tmpl, as, tn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, tn.tmpl, as, tn.log, &tmplErr)
 
 	message := fmt.Sprintf("%s%s\n\n*Message:*\n%s\n*URL:* %s\n",
 		selectEmoji(as...),

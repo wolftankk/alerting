@@ -7,14 +7,14 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
-	"github.com/prometheus/alertmanager/template"
+
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 const (
@@ -226,32 +226,27 @@ func (i AdaptiveCardOpenURLActionItem) MarshalJSON() ([]byte, error) {
 
 type Notifier struct {
 	*receivers.Base
-	tmpl     *template.Template
+	tmpl     *templates.Template
 	log      logging.Logger
 	ns       receivers.WebhookSender
-	images   images.ImageStore
+	images   images.Provider
 	settings Config
 }
 
-// New is the constructor for Teams notifier.
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		log:      fc.Logger,
-		ns:       fc.NotificationService,
-		images:   fc.ImageStore,
-		tmpl:     fc.Template,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		log:      logger,
+		ns:       sender,
+		images:   images,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 func (tn *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, tn.tmpl, as, tn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, tn.tmpl, as, tn.log, &tmplErr)
 
 	card := NewAdaptiveCard()
 	card.AppendItem(AdaptiveCardTextBlockItem{
@@ -325,6 +320,7 @@ func (tn *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 	return true, nil
 }
 
+//nolint:revive
 func validateResponse(b []byte, statusCode int) error {
 	// The request succeeded if the response is "1"
 	// https://docs.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/connectors-using?tabs=cURL#send-messages-using-curl-and-powershell

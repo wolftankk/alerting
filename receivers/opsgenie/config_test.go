@@ -130,6 +130,46 @@ func TestNewConfig(t *testing.T) {
 			expectedInitError: `invalid value for sendTagsAs: "test-tags"`,
 		},
 		{
+			name: "Error if responder type is not supported",
+			settings: `{ "responders" : [
+				{ "type" : "test-123", "id": "test" } 
+			] }`,
+			secureSettings: map[string][]byte{
+				"apiKey": []byte("test-api-key"),
+			},
+			expectedInitError: `responder at index [0] has unsupported type. Supported only: team,teams,user,escalation,schedule`,
+		},
+		{
+			name: "Error if responder type is teams and name is empty",
+			settings: `{ "responders" : [
+				{ "type" : "teams", "id": "test" } 
+			] }`,
+			secureSettings: map[string][]byte{
+				"apiKey": []byte("test-api-key"),
+			},
+			expectedInitError: `responder at index [0] has type 'teams' but empty name. Must be comma-separated string of names`,
+		},
+		{
+			name: "Error if responder type is not supported",
+			settings: `{ "responders" : [
+				{ "type" : "test-123", "id": "test" } 
+			] }`,
+			secureSettings: map[string][]byte{
+				"apiKey": []byte("test-api-key"),
+			},
+			expectedInitError: `responder at index [0] has unsupported type. Supported only: team,teams,user,escalation,schedule`,
+		},
+		{
+			name: "Error if responder ID,name,username are empty",
+			settings: `{ "responders" : [
+				{ "type" : "user" } 
+			] }`,
+			secureSettings: map[string][]byte{
+				"apiKey": []byte("test-api-key"),
+			},
+			expectedInitError: `responder at index [0] must have at least one of id, username or name specified`,
+		},
+		{
 			name:     "Should use default message if all spaces",
 			settings: `{ "message" : " " }`,
 			secureSettings: map[string][]byte{
@@ -157,7 +197,8 @@ func TestNewConfig(t *testing.T) {
 				"description": "", 
 				"autoClose": null, 
 				"overridePriority": null, 
-				"sendTagsAs": ""
+				"sendTagsAs": "",
+				"responders": null
 			}`,
 			expectedConfig: Config{
 				APIKey:           "test-api-key",
@@ -167,21 +208,13 @@ func TestNewConfig(t *testing.T) {
 				AutoClose:        true,
 				OverridePriority: true,
 				SendTagsAs:       SendTags,
+				Responders:       nil,
 			},
 		},
 		{
-			name: "Extracts all fields",
-			secureSettings: map[string][]byte{
-				"apiKey": []byte("test-api-key"),
-			},
-			settings: `{
-				"apiUrl" : "http://localhost", 
-				"message" : "test-message", 
-				"description": "test-description", 
-				"autoClose": false, 
-				"overridePriority": false, 
-				"sendTagsAs": "both"
-			}`,
+			name:           "Extracts all fields",
+			secureSettings: map[string][]byte{},
+			settings:       FullValidConfigForTesting,
 			expectedConfig: Config{
 				APIKey:           "test-api-key",
 				APIUrl:           "http://localhost",
@@ -190,6 +223,48 @@ func TestNewConfig(t *testing.T) {
 				AutoClose:        false,
 				OverridePriority: false,
 				SendTagsAs:       "both",
+				Responders: []MessageResponder{
+					{
+						ID:   "test-id",
+						Type: "team",
+					},
+					{
+						Username: "test-user",
+						Type:     "user",
+					},
+					{
+						Name: "test-schedule",
+						Type: "schedule",
+					},
+				},
+			},
+		},
+		{
+			name:           "Extracts all fields + override from secrets",
+			secureSettings: receiversTesting.ReadSecretsJSONForTesting(FullValidSecretsForTesting),
+			settings:       FullValidConfigForTesting,
+			expectedConfig: Config{
+				APIKey:           "test-secret-api-key",
+				APIUrl:           "http://localhost",
+				Message:          "test-message",
+				Description:      "test-description",
+				AutoClose:        false,
+				OverridePriority: false,
+				SendTagsAs:       "both",
+				Responders: []MessageResponder{
+					{
+						ID:   "test-id",
+						Type: "team",
+					},
+					{
+						Username: "test-user",
+						Type:     "user",
+					},
+					{
+						Name: "test-schedule",
+						Type: "schedule",
+					},
+				},
 			},
 		},
 	}

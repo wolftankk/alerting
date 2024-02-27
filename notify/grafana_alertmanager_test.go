@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sort"
@@ -9,17 +10,21 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-openapi/strfmt"
-	"github.com/prometheus/alertmanager/api/v2/models"
 	amv2 "github.com/prometheus/alertmanager/api/v2/models"
+	"github.com/prometheus/alertmanager/config"
+	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/pkg/labels"
 	"github.com/prometheus/alertmanager/provider/mem"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 )
 
-func setupAMTest(t *testing.T) *GrafanaAlertmanager {
-	m := NewGrafanaAlertmanagerMetrics(prometheus.NewPedanticRegistry())
+func setupAMTest(t *testing.T) (*GrafanaAlertmanager, *prometheus.Registry) {
+	reg := prometheus.NewPedanticRegistry()
+	m := NewGrafanaAlertmanagerMetrics(reg)
 
 	grafanaConfig := &GrafanaAlertmanagerConfig{
 		Silences: newFakeMaintanenceOptions(t),
@@ -28,11 +33,11 @@ func setupAMTest(t *testing.T) *GrafanaAlertmanager {
 
 	am, err := NewGrafanaAlertmanager("org", 1, grafanaConfig, &NilPeer{}, log.NewNopLogger(), m)
 	require.NoError(t, err)
-	return am
+	return am, reg
 }
 
 func TestPutAlert(t *testing.T) {
-	am := setupAMTest(t)
+	am, _ := setupAMTest(t)
 
 	startTime := time.Now()
 	endTime := startTime.Add(2 * time.Hour)
@@ -47,33 +52,33 @@ func TestPutAlert(t *testing.T) {
 			title: "Valid alerts with different start/end set",
 			postableAlerts: amv2.PostableAlerts{
 				{ // Start and end set.
-					Annotations: models.LabelSet{"msg": "Alert1 annotation"},
-					Alert: models.Alert{
-						Labels:       models.LabelSet{"alertname": "Alert1"},
+					Annotations: amv2.LabelSet{"msg": "Alert1 annotation"},
+					Alert: amv2.Alert{
+						Labels:       amv2.LabelSet{"alertname": "Alert1"},
 						GeneratorURL: "http://localhost/url1",
 					},
 					StartsAt: strfmt.DateTime(startTime),
 					EndsAt:   strfmt.DateTime(endTime),
 				}, { // Only end is set.
-					Annotations: models.LabelSet{"msg": "Alert2 annotation"},
-					Alert: models.Alert{
-						Labels:       models.LabelSet{"alertname": "Alert2"},
+					Annotations: amv2.LabelSet{"msg": "Alert2 annotation"},
+					Alert: amv2.Alert{
+						Labels:       amv2.LabelSet{"alertname": "Alert2"},
 						GeneratorURL: "http://localhost/url2",
 					},
 					StartsAt: strfmt.DateTime{},
 					EndsAt:   strfmt.DateTime(endTime),
 				}, { // Only start is set.
-					Annotations: models.LabelSet{"msg": "Alert3 annotation"},
-					Alert: models.Alert{
-						Labels:       models.LabelSet{"alertname": "Alert3"},
+					Annotations: amv2.LabelSet{"msg": "Alert3 annotation"},
+					Alert: amv2.Alert{
+						Labels:       amv2.LabelSet{"alertname": "Alert3"},
 						GeneratorURL: "http://localhost/url3",
 					},
 					StartsAt: strfmt.DateTime(startTime),
 					EndsAt:   strfmt.DateTime{},
 				}, { // Both start and end are not set.
-					Annotations: models.LabelSet{"msg": "Alert4 annotation"},
-					Alert: models.Alert{
-						Labels:       models.LabelSet{"alertname": "Alert4"},
+					Annotations: amv2.LabelSet{"msg": "Alert4 annotation"},
+					Alert: amv2.Alert{
+						Labels:       amv2.LabelSet{"alertname": "Alert4"},
 						GeneratorURL: "http://localhost/url4",
 					},
 					StartsAt: strfmt.DateTime{},
@@ -127,9 +132,9 @@ func TestPutAlert(t *testing.T) {
 			title: "Removing empty labels and annotations",
 			postableAlerts: amv2.PostableAlerts{
 				{
-					Annotations: models.LabelSet{"msg": "Alert4 annotation", "empty": ""},
-					Alert: models.Alert{
-						Labels:       models.LabelSet{"alertname": "Alert4", "emptylabel": ""},
+					Annotations: amv2.LabelSet{"msg": "Alert4 annotation", "empty": ""},
+					Alert: amv2.Alert{
+						Labels:       amv2.LabelSet{"alertname": "Alert4", "emptylabel": ""},
 						GeneratorURL: "http://localhost/url1",
 					},
 					StartsAt: strfmt.DateTime{},
@@ -155,9 +160,9 @@ func TestPutAlert(t *testing.T) {
 			title: "Allow spaces in label and annotation name",
 			postableAlerts: amv2.PostableAlerts{
 				{
-					Annotations: models.LabelSet{"Dashboard URL": "http://localhost:3000"},
-					Alert: models.Alert{
-						Labels:       models.LabelSet{"alertname": "Alert4", "Spaced Label": "works"},
+					Annotations: amv2.LabelSet{"Dashboard URL": "http://localhost:3000"},
+					Alert: amv2.Alert{
+						Labels:       amv2.LabelSet{"alertname": "Alert4", "Spaced Label": "works"},
 						GeneratorURL: "http://localhost/url1",
 					},
 					StartsAt: strfmt.DateTime{},
@@ -183,8 +188,8 @@ func TestPutAlert(t *testing.T) {
 			title: "Special characters in labels",
 			postableAlerts: amv2.PostableAlerts{
 				{
-					Alert: models.Alert{
-						Labels: models.LabelSet{"alertname$": "Alert1", "az3-- __...++!!!£@@312312": "1"},
+					Alert: amv2.Alert{
+						Labels: amv2.LabelSet{"alertname$": "Alert1", "az3-- __...++!!!£@@312312": "1"},
 					},
 				},
 			},
@@ -207,9 +212,9 @@ func TestPutAlert(t *testing.T) {
 			title: "Special characters in annotations",
 			postableAlerts: amv2.PostableAlerts{
 				{
-					Annotations: models.LabelSet{"az3-- __...++!!!£@@312312": "Alert4 annotation"},
-					Alert: models.Alert{
-						Labels: models.LabelSet{"alertname": "Alert4"},
+					Annotations: amv2.LabelSet{"az3-- __...++!!!£@@312312": "Alert4 annotation"},
+					Alert: amv2.Alert{
+						Labels: amv2.LabelSet{"alertname": "Alert4"},
 					},
 				},
 			},
@@ -232,16 +237,16 @@ func TestPutAlert(t *testing.T) {
 			title: "No labels after removing empty",
 			postableAlerts: amv2.PostableAlerts{
 				{
-					Alert: models.Alert{
-						Labels: models.LabelSet{"alertname": ""},
+					Alert: amv2.Alert{
+						Labels: amv2.LabelSet{"alertname": ""},
 					},
 				},
 			},
 			expError: &AlertValidationError{
 				Alerts: amv2.PostableAlerts{
 					{
-						Alert: models.Alert{
-							Labels: models.LabelSet{"alertname": ""},
+						Alert: amv2.Alert{
+							Labels: amv2.LabelSet{"alertname": ""},
 						},
 					},
 				},
@@ -251,8 +256,8 @@ func TestPutAlert(t *testing.T) {
 			title: "Start should be before end",
 			postableAlerts: amv2.PostableAlerts{
 				{
-					Alert: models.Alert{
-						Labels: models.LabelSet{"alertname": ""},
+					Alert: amv2.Alert{
+						Labels: amv2.LabelSet{"alertname": ""},
 					},
 					StartsAt: strfmt.DateTime(endTime),
 					EndsAt:   strfmt.DateTime(startTime),
@@ -261,8 +266,8 @@ func TestPutAlert(t *testing.T) {
 			expError: &AlertValidationError{
 				Alerts: amv2.PostableAlerts{
 					{
-						Alert: models.Alert{
-							Labels: models.LabelSet{"alertname": ""},
+						Alert: amv2.Alert{
+							Labels: amv2.LabelSet{"alertname": ""},
 						},
 						StartsAt: strfmt.DateTime(endTime),
 						EndsAt:   strfmt.DateTime(startTime),
@@ -309,20 +314,215 @@ func TestPutAlert(t *testing.T) {
 	}
 }
 
+func TestCreateSilence(t *testing.T) {
+	am, _ := setupAMTest(t)
+
+	cases := []struct {
+		name    string
+		silence PostableSilence
+		expErr  string
+	}{{
+		name: "can create silence for foo=bar",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr("foo"),
+					Value:   ptr("bar"),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+	}, {
+		name: "can create silence for _foo1=bar",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr("_foo1"),
+					Value:   ptr("bar"),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+	}, {
+		name: "can create silence for 0foo=bar",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr("0foo"),
+					Value:   ptr("bar"),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+	}, {
+		name: "can create silence for foo=🙂bar",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr("foo"),
+					Value:   ptr("🙂bar"),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+	}, {
+		name: "can create silence for foo🙂=bar",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr("foo🙂"),
+					Value:   ptr("bar"),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+	}, {
+		name: "can't create silence for missing label name",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr(""),
+					Value:   ptr("bar"),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+		expErr: "unable to save silence: silence invalid: invalid label matcher 0: invalid label name \"\": unable to create silence",
+	}, {
+		name: "can't create silence for missing label value",
+		silence: PostableSilence{
+			Silence: amv2.Silence{
+				Comment:   ptr("This is a comment"),
+				CreatedBy: ptr("test"),
+				EndsAt:    ptr(strfmt.DateTime(time.Now().Add(time.Minute))),
+				Matchers: amv2.Matchers{{
+					IsEqual: ptr(true),
+					IsRegex: ptr(false),
+					Name:    ptr("foo"),
+					Value:   ptr(""),
+				}},
+				StartsAt: ptr(strfmt.DateTime(time.Now())),
+			},
+		},
+		expErr: "unable to save silence: silence invalid: at least one matcher must not match the empty string: unable to create silence",
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			silenceID, err := am.CreateSilence(&c.silence)
+			if c.expErr != "" {
+				require.EqualError(t, err, c.expErr)
+				require.Empty(t, silenceID)
+			} else {
+				require.NoError(t, err)
+				require.NotEmpty(t, silenceID)
+			}
+		})
+	}
+}
+
+func TestGrafanaAlertmanager_setInhibitionRulesMetrics(t *testing.T) {
+	am, reg := setupAMTest(t)
+
+	m1, err := labels.NewMatcher(labels.MatchEqual, "foo", "bar")
+	require.NoError(t, err)
+	m2, err := labels.NewMatcher(labels.MatchEqual, "bar", "baz")
+	require.NoError(t, err)
+	m3, err := labels.NewMatcher(labels.MatchEqual, "baz", "qux")
+	require.NoError(t, err)
+	m4, err := labels.NewMatcher(labels.MatchEqual, "qux", "corge")
+	require.NoError(t, err)
+
+	r := []InhibitRule{{
+		SourceMatchers: config.Matchers{m1},
+		TargetMatchers: config.Matchers{m2},
+	}, {
+		SourceMatchers: config.Matchers{m3},
+		TargetMatchers: config.Matchers{m4},
+	}}
+	am.setInhibitionRulesMetrics(r)
+
+	require.NoError(t, testutil.GatherAndCompare(reg, bytes.NewBufferString(`
+							# HELP grafana_alerting_alertmanager_inhibition_rules Number of configured inhibition rules.
+        	            	# TYPE grafana_alerting_alertmanager_inhibition_rules gauge
+        	            	grafana_alerting_alertmanager_inhibition_rules{org="1"} 2
+`), "grafana_alerting_alertmanager_inhibition_rules"))
+}
+
+func TestGrafanaAlertmanager_setReceiverMetrics(t *testing.T) {
+	fn := &fakeNotifier{}
+	integrations := []*notify.Integration{
+		notify.NewIntegration(fn, fn, "grafana-oncall", 0, "test-grafana-oncall"),
+		notify.NewIntegration(fn, fn, "sns", 1, "test-sns"),
+	}
+
+	am, reg := setupAMTest(t)
+
+	receivers := []*notify.Receiver{
+		notify.NewReceiver("ActiveNoIntegrations", true, nil),
+		notify.NewReceiver("InactiveNoIntegrations", false, nil),
+		notify.NewReceiver("ActiveMultipleIntegrations", true, integrations),
+		notify.NewReceiver("InactiveMultipleIntegrations", false, integrations),
+	}
+
+	am.setReceiverMetrics(receivers, 2)
+
+	require.NoError(t, testutil.GatherAndCompare(reg, bytes.NewBufferString(`
+        	            	# HELP grafana_alerting_alertmanager_integrations Number of configured integrations.
+        	            	# TYPE grafana_alerting_alertmanager_integrations gauge
+        	            	grafana_alerting_alertmanager_integrations{org="1",type="grafana-oncall"} 2
+        	            	grafana_alerting_alertmanager_integrations{org="1",type="sns"} 2
+        	            	# HELP grafana_alerting_alertmanager_receivers Number of configured receivers by state. It is considered active if used within a route.
+        	            	# TYPE grafana_alerting_alertmanager_receivers gauge
+        	            	grafana_alerting_alertmanager_receivers{org="1",state="active"} 2
+        	            	grafana_alerting_alertmanager_receivers{org="1",state="inactive"} 2
+`), "grafana_alerting_alertmanager_receivers", "grafana_alerting_alertmanager_integrations"))
+}
+
 // Tests cleanup of expired Silences. We rely on prometheus/alertmanager for
 // our alert silencing functionality, so we rely on its tests. However, we
 // implement a custom maintenance function for silences, because we snapshot
 // our data differently, so we test that functionality.
 func TestSilenceCleanup(t *testing.T) {
-	am := setupAMTest(t)
+	am, _ := setupAMTest(t)
 	now := time.Now()
 	dt := func(t time.Time) strfmt.DateTime { return strfmt.DateTime(t) }
 
 	makeSilence := func(comment string, createdBy string,
-		startsAt, endsAt strfmt.DateTime, matchers models.Matchers) *PostableSilence {
+		startsAt, endsAt strfmt.DateTime, matchers amv2.Matchers) *PostableSilence {
 		return &PostableSilence{
 			ID: "",
-			Silence: models.Silence{
+			Silence: amv2.Silence{
 				Comment:   &comment,
 				CreatedBy: &createdBy,
 				StartsAt:  &startsAt,
@@ -334,7 +534,7 @@ func TestSilenceCleanup(t *testing.T) {
 
 	tru := true
 	testString := "testName"
-	matchers := models.Matchers{&models.Matcher{Name: &testString, IsEqual: &tru, IsRegex: &tru, Value: &testString}}
+	matchers := amv2.Matchers{&amv2.Matcher{Name: &testString, IsEqual: &tru, IsRegex: &tru, Value: &testString}}
 	// Create silences - one in the future, one currently active, one expired but
 	// retained, one expired and not retained.
 	silences := []*PostableSilence{
@@ -367,46 +567,4 @@ func TestSilenceCleanup(t *testing.T) {
 		require.NoError(t, err)
 		return len(found) == 2
 	}, 6*time.Second, 150*time.Millisecond)
-}
-
-type FakeConfig struct {
-}
-
-func (f *FakeConfig) DispatcherLimits() DispatcherLimits {
-	panic("implement me")
-}
-
-func (f *FakeConfig) InhibitRules() []*InhibitRule {
-	// TODO implement me
-	panic("implement me")
-}
-
-func (f *FakeConfig) MuteTimeIntervals() []MuteTimeInterval {
-	// TODO implement me
-	panic("implement me")
-}
-
-func (f *FakeConfig) ReceiverIntegrations() (map[string][]Integration, error) {
-	// TODO implement me
-	panic("implement me")
-}
-
-func (f *FakeConfig) RoutingTree() *Route {
-	// TODO implement me
-	panic("implement me")
-}
-
-func (f *FakeConfig) Templates() *Template {
-	// TODO implement me
-	panic("implement me")
-}
-
-func (f *FakeConfig) Hash() [16]byte {
-	// TODO implement me
-	panic("implement me")
-}
-
-func (f *FakeConfig) Raw() []byte {
-	// TODO implement me
-	panic("implement me")
 }

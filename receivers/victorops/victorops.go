@@ -7,14 +7,14 @@ import (
 	"time"
 
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
+
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 // https://help.victorops.com/knowledge-base/incident-fields-glossary/ - 20480 characters.
@@ -31,29 +31,25 @@ const (
 type Notifier struct {
 	*receivers.Base
 	log        logging.Logger
-	images     images.ImageStore
+	images     images.Provider
 	ns         receivers.WebhookSender
-	tmpl       *template.Template
+	tmpl       *templates.Template
 	settings   Config
 	appVersion string
 }
 
 // New creates an instance of VictoropsNotifier that
 // handles posting notifications to Victorops REST API
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger, appVersion string) *Notifier {
 	return &Notifier{
-		Base:       receivers.NewBase(fc.Config),
-		log:        fc.Logger,
-		images:     fc.ImageStore,
-		ns:         fc.NotificationService,
-		tmpl:       fc.Template,
-		settings:   settings,
-		appVersion: fc.GrafanaBuildVersion,
-	}, nil
+		Base:       receivers.NewBase(meta),
+		log:        logger,
+		images:     images,
+		ns:         sender,
+		tmpl:       template,
+		settings:   cfg,
+		appVersion: appVersion,
+	}
 }
 
 // Notify sends notification to Victorops via POST to URL endpoint
@@ -61,7 +57,7 @@ func (vn *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 	vn.log.Debug("sending notification", "notification", vn.Name)
 
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, vn.tmpl, as, vn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, vn.tmpl, as, vn.log, &tmplErr)
 
 	messageType := buildMessageType(vn.log, tmpl, vn.settings.MessageType, as...)
 

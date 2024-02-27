@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	receiversTesting "github.com/grafana/alerting/receivers/testing"
 	"github.com/grafana/alerting/templates"
 )
 
@@ -13,6 +14,7 @@ func TestNewConfig(t *testing.T) {
 	cases := []struct {
 		name              string
 		settings          string
+		secrets           map[string][]byte
 		expectedConfig    Config
 		expectedInitError string
 	}{
@@ -43,6 +45,20 @@ func TestNewConfig(t *testing.T) {
 			},
 		},
 		{
+			name:     "Minimal valid configuration from secure settings",
+			settings: `{}`,
+			secrets: map[string][]byte{
+				"url": []byte("http://localhost"),
+			},
+			expectedConfig: Config{
+				Title:              templates.DefaultMessageTitleEmbed,
+				Message:            templates.DefaultMessageEmbed,
+				AvatarURL:          "",
+				WebhookURL:         "http://localhost",
+				UseDiscordUsername: false,
+			},
+		},
+		{
 			name:     "All empty fields = minimal valid configuration",
 			settings: `{"url": "http://localhost", "title": "", "message": "", "avatar_url" : "", "use_discord_username": null}`,
 			expectedConfig: Config{
@@ -55,7 +71,7 @@ func TestNewConfig(t *testing.T) {
 		},
 		{
 			name:     "Extracts all fields",
-			settings: `{"url": "http://localhost", "title": "test-title", "message": "test-message", "avatar_url" : "http://avatar", "use_discord_username": true}`,
+			settings: FullValidConfigForTesting,
 			expectedConfig: Config{
 				Title:              "test-title",
 				Message:            "test-message",
@@ -68,7 +84,7 @@ func TestNewConfig(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			actual, err := NewConfig(json.RawMessage(c.settings))
+			actual, err := NewConfig(json.RawMessage(c.settings), receiversTesting.DecryptForTesting(c.secrets))
 
 			if c.expectedInitError != "" {
 				require.ErrorContains(t, err, c.expectedInitError)

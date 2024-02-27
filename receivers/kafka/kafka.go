@@ -6,14 +6,14 @@ import (
 	"fmt"
 
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
+
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	template2 "github.com/grafana/alerting/templates"
+	"github.com/grafana/alerting/templates"
 )
 
 type kafkaBody struct {
@@ -49,27 +49,21 @@ type kafkaContext struct {
 type Notifier struct {
 	*receivers.Base
 	log      logging.Logger
-	images   images.ImageStore
+	images   images.Provider
 	ns       receivers.WebhookSender
-	tmpl     *template.Template
+	tmpl     *templates.Template
 	settings Config
 }
 
-// New is the constructor function for the Kafka notifier.
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings, fc.Decrypt)
-	if err != nil {
-		return nil, err
-	}
-
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		log:      fc.Logger,
-		images:   fc.ImageStore,
-		ns:       fc.NotificationService,
-		tmpl:     fc.Template,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		log:      logger,
+		ns:       sender,
+		images:   images,
+		tmpl:     template,
+		settings: cfg,
+	}
 }
 
 // Notify sends the alert notification.
@@ -83,7 +77,7 @@ func (kn *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 // Use the v2 API to send the alert notification.
 func (kn *Notifier) notifyWithAPIV2(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, kn.tmpl, as, kn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, kn.tmpl, as, kn.log, &tmplErr)
 
 	topicURL := kn.settings.Endpoint + "/topics/" + tmpl(kn.settings.Topic)
 	if tmplErr != nil {
@@ -120,7 +114,7 @@ func (kn *Notifier) notifyWithAPIV2(ctx context.Context, as ...*types.Alert) (bo
 // Use the v3 API to send the alert notification.
 func (kn *Notifier) notifyWithAPIV3(ctx context.Context, as ...*types.Alert) (bool, error) {
 	var tmplErr error
-	tmpl, _ := template2.TmplText(ctx, kn.tmpl, as, kn.log, &tmplErr)
+	tmpl, _ := templates.TmplText(ctx, kn.tmpl, as, kn.log, &tmplErr)
 
 	// For v3 the Produce URL is like this,
 	// <Endpoint>/v3/clusters/<KafkaClusterID>/topics/<Topic>/records
@@ -274,9 +268,9 @@ func buildState(as ...*types.Alert) receivers.AlertStateType {
 	return receivers.AlertStateAlerting
 }
 
-func buildContextImages(ctx context.Context, l logging.Logger, imageStore images.ImageStore, as ...*types.Alert) []kafkaContext {
+func buildContextImages(ctx context.Context, l logging.Logger, imageProvider images.Provider, as ...*types.Alert) []kafkaContext {
 	var contexts []kafkaContext
-	_ = images.WithStoredImages(ctx, l, imageStore,
+	_ = images.WithStoredImages(ctx, l, imageProvider,
 		func(_ int, image images.Image) error {
 			if image.URL != "" {
 				contexts = append(contexts, kafkaContext{
