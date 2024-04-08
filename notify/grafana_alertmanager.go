@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+
 	"github.com/grafana/alerting/cluster"
 	amv2 "github.com/prometheus/alertmanager/api/v2/models"
 	"github.com/prometheus/alertmanager/config"
@@ -39,6 +40,9 @@ const (
 	defaultResolveTimeout = 5 * time.Minute
 	// memoryAlertsGCInterval is the interval at which we'll remove resolved alerts from memory.
 	memoryAlertsGCInterval = 30 * time.Minute
+	// snapshotPlaceholder is not a real snapshot file and will not be used, a non-empty string is required to run the maintenance function on shutdown.
+	// See https://github.com/prometheus/alertmanager/blob/3ee2cd0f1271e277295c02b6160507b4d193dde2/silence/silence.go#L435-L438
+	snapshotPlaceholder = "snapshot"
 )
 
 func init() {
@@ -96,10 +100,9 @@ type GrafanaAlertmanager struct {
 	// buildReceiverIntegrationsFunc builds the integrations for a receiver based on its APIReceiver configuration and the current parsed template.
 	buildReceiverIntegrationsFunc func(next *APIReceiver, tmpl *templates.Template) ([]*Integration, error)
 	externalURL                   string
-	workingDirectory              string
 
-	// templates contains the filenames (not full paths) of the persisted templates that were used to construct the current parsed template.
-	templates []string
+	// templates contains the template name -> template contents for each user-defined template.
+	templates []templates.TemplateDefinition
 }
 
 // State represents any of the two 'states' of the alertmanager. Notification log or Silences.
@@ -110,14 +113,14 @@ type State interface {
 
 // MaintenanceOptions represent the configuration options available for executing maintenance of Silences and the Notification log that the Alertmanager uses.
 type MaintenanceOptions interface {
-	// Filepath returns the string representation of the filesystem path of the file to do maintenance on.
-	Filepath() string
+	// InitialState returns the initial snapshot of the artefacts under maintenance. This will be loaded when the Alertmanager starts.
+	InitialState() string
 	// Retention represents for how long should we keep the artefacts under maintenance.
 	Retention() time.Duration
 	// MaintenanceFrequency represents how often should we execute the maintenance.
 	MaintenanceFrequency() time.Duration
-	// MaintenanceFunc returns the function to execute as part of the maintenance process.
-	// It returns the size of the file in bytes or an error if the maintenance fails.
+	// MaintenanceFunc returns the function to execute as part of the maintenance process. This will usually take a snaphot of the artefacts under maintenance.
+	// It returns the size of the state in bytes or an error if the maintenance fails.
 	MaintenanceFunc(state State) (int64, error)
 }
 
@@ -145,14 +148,13 @@ type Configuration interface {
 	BuildReceiverIntegrationsFunc() func(next *APIReceiver, tmpl *templates.Template) ([]*Integration, error)
 
 	RoutingTree() *Route
-	Templates() []string
+	Templates() []templates.TemplateDefinition
 
 	Hash() [16]byte
 	Raw() []byte
 }
 
 type GrafanaAlertmanagerConfig struct {
-	WorkingDirectory   string
 	ExternalURL        string
 	AlertStoreCallback mem.AlertStoreCallback
 	PeerTimeout        time.Duration
@@ -187,7 +189,6 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 		Metrics:           m,
 		tenantID:          tenantID,
 		externalURL:       config.ExternalURL,
-		workingDirectory:  config.WorkingDirectory,
 	}
 
 	if err := config.Validate(); err != nil {
@@ -198,9 +199,9 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 
 	// Initialize silences
 	am.silences, err = silence.New(silence.Options{
-		Metrics:      m.Registerer,
-		SnapshotFile: config.Silences.Filepath(),
-		Retention:    config.Silences.Retention(),
+		Metrics:        m.Registerer,
+		SnapshotReader: strings.NewReader(config.Silences.InitialState()),
+		Retention:      config.Silences.Retention(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize the silencing component of alerting: %w", err)
@@ -208,10 +209,10 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 
 	// Initialize the notification log
 	am.notificationLog, err = nflog.New(nflog.Options{
-		SnapshotFile: config.Nflog.Filepath(),
-		Retention:    config.Nflog.Retention(),
-		Logger:       logger,
-		Metrics:      m.Registerer,
+		SnapshotReader: strings.NewReader(config.Nflog.InitialState()),
+		Retention:      config.Nflog.Retention(),
+		Logger:         logger,
+		Metrics:        m.Registerer,
 	})
 
 	if err != nil {
@@ -225,7 +226,7 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 
 	am.wg.Add(1)
 	go func() {
-		am.notificationLog.Maintenance(config.Nflog.MaintenanceFrequency(), config.Nflog.Filepath(), am.stopc, func() (int64, error) {
+		am.notificationLog.Maintenance(config.Nflog.MaintenanceFrequency(), snapshotPlaceholder, am.stopc, func() (int64, error) {
 			if _, err := am.notificationLog.GC(); err != nil {
 				level.Error(am.logger).Log("notification log garbage collection", "err", err)
 			}
@@ -237,7 +238,7 @@ func NewGrafanaAlertmanager(tenantKey string, tenantID int64, config *GrafanaAle
 
 	am.wg.Add(1)
 	go func() {
-		am.silences.Maintenance(config.Silences.MaintenanceFrequency(), config.Silences.Filepath(), am.stopc, func() (int64, error) {
+		am.silences.Maintenance(config.Silences.MaintenanceFrequency(), snapshotPlaceholder, am.stopc, func() (int64, error) {
 			// Delete silences older than the retention period.
 			if _, err := am.silences.GC(); err != nil {
 				level.Error(am.logger).Log("silence garbage collection", "err", err)
@@ -302,10 +303,6 @@ func (am *GrafanaAlertmanager) ExternalURL() string {
 	return am.externalURL
 }
 
-func (am *GrafanaAlertmanager) WorkingDirectory() string {
-	return am.workingDirectory
-}
-
 // ConfigHash returns the hash of the current running configuration.
 // It is not safe to call without a lock.
 func (am *GrafanaAlertmanager) ConfigHash() [16]byte {
@@ -324,9 +321,9 @@ func (am *GrafanaAlertmanager) WithLock(fn func()) {
 	fn()
 }
 
-// TemplateFromPaths returns a set of *Templates based on the paths given.
-func (am *GrafanaAlertmanager) TemplateFromPaths(paths []string, options ...template.Option) (*templates.Template, error) {
-	tmpl, err := templates.FromGlobs(paths, options...)
+// TemplateFromContent returns a *Template based on defaults and the provided template contents.
+func (am *GrafanaAlertmanager) TemplateFromContent(tmpls []string, options ...template.Option) (*templates.Template, error) {
+	tmpl, err := templates.FromContent(tmpls, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -354,13 +351,18 @@ func (am *GrafanaAlertmanager) buildTimeIntervals(timeIntervals []config.TimeInt
 func (am *GrafanaAlertmanager) ApplyConfig(cfg Configuration) (err error) {
 	am.templates = cfg.Templates()
 
-	// Create the parsed template using the template paths.
-	paths := make([]string, 0)
-	for _, name := range am.templates {
-		paths = append(paths, filepath.Join(am.workingDirectory, name))
+	seen := make(map[string]struct{})
+	tmpls := make([]string, 0, len(am.templates))
+	for _, tc := range am.templates {
+		if _, ok := seen[tc.Name]; ok {
+			level.Warn(am.logger).Log("msg", "template with same name is defined multiple times, skipping...", "template_name", tc.Name)
+			continue
+		}
+		tmpls = append(tmpls, tc.Template)
+		seen[tc.Name] = struct{}{}
 	}
 
-	tmpl, err := am.TemplateFromPaths(paths)
+	tmpl, err := am.TemplateFromContent(tmpls)
 	if err != nil {
 		return err
 	}
@@ -392,9 +394,9 @@ func (am *GrafanaAlertmanager) ApplyConfig(cfg Configuration) (err error) {
 	am.silencer = silence.NewSilencer(am.silences, am.marker, am.logger)
 
 	meshStage := notify.NewGossipSettleStage(am.peer)
-	inhibitionStage := notify.NewMuteStage(am.inhibitor)
-	timeMuteStage := notify.NewTimeMuteStage(timeinterval.NewIntervener(am.timeIntervals))
-	silencingStage := notify.NewMuteStage(am.silencer)
+	inhibitionStage := notify.NewMuteStage(am.inhibitor, am.stageMetrics)
+	timeMuteStage := notify.NewTimeMuteStage(timeinterval.NewIntervener(am.timeIntervals), am.stageMetrics)
+	silencingStage := notify.NewMuteStage(am.silencer, am.stageMetrics)
 
 	am.route = dispatch.NewRoute(cfg.RoutingTree(), nil)
 	am.dispatcher = dispatch.NewDispatcher(am.alerts, am.route, routingStage, am.marker, am.timeoutFunc, cfg.DispatcherLimits(), am.logger, am.dispatcherMetrics)
