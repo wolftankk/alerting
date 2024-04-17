@@ -136,6 +136,9 @@ func BuildReceiverIntegrations(
 	for i, cfg := range receiver.WebexConfigs {
 		ci(i, cfg.Metadata, webex.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata), orgID))
 	}
+	for i, cfg := range receiver.FeishuConfigs {
+		ci(i, cfg.Metadata, feishu.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata), version))
+	}
 	if errors.Len() > 0 {
 		return nil, &errors
 	}

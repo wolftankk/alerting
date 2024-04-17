@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
-	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 )
 
@@ -29,27 +27,25 @@ var (
 
 type Notifier struct {
 	*receivers.Base
-	log      logging.Logger
-	images   images.ImageStore
-	ns       receivers.WebhookSender
-	tmpl     *template.Template
-	settings Config
+	log        logging.Logger
+	tmpl       *templates.Template
+	images     images.Provider
+	sender     receivers.WebhookSender
+	settings   Config
+	appVersion string
 }
 
-func New(fc receivers.FactoryConfig) (*Notifier, error) {
-	settings, err := NewConfig(fc.Config.Settings)
-	if err != nil {
-		return nil, err
-	}
-
+func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger, appVersion string) *Notifier {
 	return &Notifier{
-		Base:     receivers.NewBase(fc.Config),
-		images:   fc.ImageStore,
-		log:      fc.Logger,
-		ns:       fc.NotificationService,
-		tmpl:     fc.Template,
-		settings: settings,
-	}, nil
+		Base:     receivers.NewBase(meta),
+		settings: cfg,
+
+		images:     images,
+		sender:     sender,
+		log:        logger,
+		tmpl:       template,
+		appVersion: appVersion,
+	}
 }
 
 type feishuImage struct {
@@ -80,15 +76,23 @@ func (fs *Notifier) uploadImage(imagePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, err = io.Copy(part, image)
-	writer.WriteField("image_type", "message")
 
-	err = writer.Close()
-	if err != nil {
+	if _, err = io.Copy(part, image); err != nil {
+		return "", err
+	}
+
+	if err = writer.WriteField("image_type", "message"); err != nil {
+		return "", err
+	}
+
+	if err = writer.Close(); err != nil {
 		return "", err
 	}
 
 	request, err := http.NewRequest("POST", feishuAPIURL+"/image/v4/put/", body)
+	if err != nil {
+		return "", err
+	}
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tentantAccessToken))
 
@@ -99,7 +103,7 @@ func (fs *Notifier) uploadImage(imagePath string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -147,7 +151,7 @@ func (fs *Notifier) getTenantAccessToken() (string, error) {
 
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 
 	if err != nil {
 		return "", err
@@ -155,11 +159,13 @@ func (fs *Notifier) getTenantAccessToken() (string, error) {
 
 	tenantInfo := &feishuTenant{}
 
-	if err := json.Unmarshal(b, tenantInfo); err != nil {
+	if err = json.Unmarshal(b, tenantInfo); err != nil {
 		return "", err
 	}
 
-	feishuAccessTokenCache.SetWithExpire("tentant", tenantInfo.AccessToken, time.Duration(tenantInfo.Expire)*time.Second)
+	if err = feishuAccessTokenCache.SetWithExpire("tentant", tenantInfo.AccessToken, time.Duration(tenantInfo.Expire)*time.Second); err != nil {
+		return "", err
+	}
 
 	return tenantInfo.AccessToken, nil
 }
@@ -174,7 +180,7 @@ func (fs *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 	title := tmpl(fs.settings.Title)
 
 	//build message
-	body, err := fs.buildBody(ctx, fs.settings.MessageType, title, message)
+	body, err := fs.buildBody(ctx, title, message)
 	if err != nil {
 		fs.log.Error("gen feishu body faield.", "error", err)
 		return false, err
@@ -191,7 +197,7 @@ func (fs *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error
 		HTTPMethod: "POST",
 	}
 
-	if err = fs.ns.SendWebhook(ctx, cmd); err != nil {
+	if err = fs.sender.SendWebhook(ctx, cmd); err != nil {
 		fs.log.Error("Failed to send feishu", "error", err, "webhook", fs.Name)
 		return false, err
 	}
@@ -230,7 +236,7 @@ type feishuPost struct {
 	Content []interface{} `json:"content"`
 }
 
-func (fs *Notifier) buildBody(ctx context.Context, msgType, title, msg string) (string, error) {
+func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, error) {
 	var imageContents = make([]interface{}, 0)
 	_ = images.WithStoredImages(ctx, fs.log, fs.images, func(idx int, img images.Image) error {
 		var imageID, err = fs.uploadImage(img.Path)
@@ -275,6 +281,9 @@ func (fs *Notifier) buildBody(ctx context.Context, msgType, title, msg string) (
 
 		contents = append(contents, subContents)
 	}
+
+	//if len(fs.settings.MentionUsers) > 0 {
+	//}
 
 	post := feishuContent{
 		MessageType: "post",

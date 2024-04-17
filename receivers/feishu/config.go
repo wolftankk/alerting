@@ -5,21 +5,24 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/grafana/alerting/receivers"
+
 	"github.com/grafana/alerting/templates"
 )
 
 type Config struct {
-	URL         string `json:"url,omitempty" yaml:"url,omitempty"`
-	AppID       string `json:"appId,omitempty" yaml:"appId,omitempty"`
-	AppSecret   string `json:"appSecret,omitempty" yaml:"appSecret,omitempty"`
-	MessageType string `json:"msgType,omitempty" yaml:"msgType,omitempty"`
-	Title       string `json:"title,omitempty" yaml:"title,omitempty"`
-	Message     string `json:"message,omitempty" yaml:"message,omitempty"`
+	URL          string                          `json:"url,omitempty" yaml:"url,omitempty"`
+	AppID        string                          `json:"appId,omitempty" yaml:"appId,omitempty"`
+	AppSecret    string                          `json:"appSecret,omitempty" yaml:"appSecret,omitempty"`
+	MessageType  string                          `json:"msgType,omitempty" yaml:"msgType,omitempty"`
+	Title        string                          `json:"title,omitempty" yaml:"title,omitempty"`
+	Message      string                          `json:"message,omitempty" yaml:"message,omitempty"`
+	MentionUsers receivers.CommaSeparatedStrings `json:"mentionUsers,omitempty" yaml:"mentionUsers,omitempty"`
 }
 
 const defaultFeishuMsgType = "post"
 
-func NewConfig(jsonData json.RawMessage) (Config, error) {
+func NewConfig(jsonData json.RawMessage, decryptFn receivers.DecryptFunc) (Config, error) {
 	var settings Config
 	err := json.Unmarshal(jsonData, &settings)
 
@@ -28,10 +31,10 @@ func NewConfig(jsonData json.RawMessage) (Config, error) {
 	}
 
 	url := settings.URL
-	appId := settings.AppID
-	appSecret := settings.AppSecret
+	appID := decryptFn("appId", settings.AppID)
+	appSecret := decryptFn("appSecret", settings.AppSecret)
 
-	if url == "" || appId == "" || appSecret == "" {
+	if url == "" || appID == "" || appSecret == "" {
 		return Config{}, errors.New("could not find Bot AppID or AppSecret in settings")
 	}
 
@@ -41,6 +44,10 @@ func NewConfig(jsonData json.RawMessage) (Config, error) {
 
 	if settings.Message == "" {
 		settings.Message = templates.DefaultMessageEmbed
+	}
+
+	if settings.MessageType == "" {
+		settings.MessageType = defaultFeishuMsgType
 	}
 
 	return settings, nil
