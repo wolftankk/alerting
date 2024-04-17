@@ -13,6 +13,7 @@ import (
 	"github.com/grafana/alerting/receivers/dinding"
 	"github.com/grafana/alerting/receivers/discord"
 	"github.com/grafana/alerting/receivers/email"
+	"github.com/grafana/alerting/receivers/feishu"
 	"github.com/grafana/alerting/receivers/googlechat"
 	"github.com/grafana/alerting/receivers/kafka"
 	"github.com/grafana/alerting/receivers/line"
@@ -133,6 +134,9 @@ func BuildReceiverIntegrations(
 	}
 	for i, cfg := range receiver.WebexConfigs {
 		ci(i, cfg.Metadata, webex.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata), orgID))
+	}
+	for i, cfg := range receiver.FeishuConfigs {
+		ci(i, cfg.Metadata, feishu.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata), version))
 	}
 	if errors.Len() > 0 {
 		return nil, &errors

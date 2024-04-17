@@ -22,6 +22,7 @@ import (
 	"github.com/grafana/alerting/receivers/dinding"
 	"github.com/grafana/alerting/receivers/discord"
 	"github.com/grafana/alerting/receivers/email"
+	"github.com/grafana/alerting/receivers/feishu"
 	"github.com/grafana/alerting/receivers/googlechat"
 	"github.com/grafana/alerting/receivers/kafka"
 	"github.com/grafana/alerting/receivers/line"
@@ -38,6 +39,7 @@ import (
 	"github.com/grafana/alerting/receivers/webex"
 	"github.com/grafana/alerting/receivers/webhook"
 	"github.com/grafana/alerting/receivers/wecom"
+
 	"github.com/grafana/alerting/templates"
 )
 
@@ -353,6 +355,7 @@ type GrafanaReceiverConfig struct {
 	WebhookConfigs      []*NotifierConfig[webhook.Config]
 	WecomConfigs        []*NotifierConfig[wecom.Config]
 	WebexConfigs        []*NotifierConfig[webex.Config]
+	FeishuConfigs       []*NotifierConfig[feishu.Config]
 }
 
 // NotifierConfig represents parsed GrafanaIntegrationConfig.
@@ -514,6 +517,12 @@ func parseNotifier(ctx context.Context, result *GrafanaReceiverConfig, receiver 
 			return err
 		}
 		result.WebexConfigs = append(result.WebexConfigs, newNotifierConfig(receiver, cfg))
+	case "feishu":
+		cfg, err := feishu.NewConfig(receiver.Settings, decryptFn)
+		if err != nil {
+			return err
+		}
+		result.FeishuConfigs = append(result.FeishuConfigs, newNotifierConfig(receiver, cfg))
 	default:
 		return fmt.Errorf("notifier %s is not supported", receiver.Type)
 	}

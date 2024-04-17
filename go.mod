@@ -5,6 +5,7 @@ go 1.21
 require (
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
 	github.com/benbjohnson/clock v1.3.5
+	github.com/bluele/gcache v0.0.2
 	github.com/go-kit/log v0.2.1
 	github.com/go-openapi/strfmt v0.22.0
 	github.com/pkg/errors v0.9.1
