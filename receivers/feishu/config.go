@@ -46,9 +46,7 @@ func NewConfig(jsonData json.RawMessage, decryptFn receivers.DecryptFunc) (Confi
 		settings.Message = templates.DefaultMessageEmbed
 	}
 
-	if settings.MessageType == "" {
-		settings.MessageType = defaultFeishuMsgType
-	}
+	settings.MessageType = defaultFeishuMsgType
 
 	return settings, nil
 }
