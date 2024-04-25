@@ -238,6 +238,11 @@ type feishuImageElement struct {
 	ImageKey string `json:"img_key"`
 }
 
+type feishuPost struct {
+	MessageType string      `json:"msg_type"`
+	Card        *feishuCard `json:"card"`
+}
+
 func (fs *Notifier) buildBody(ctx context.Context, alerts ...*types.Alert) (string, error) {
 	var tmplErr error
 	tmpl, _ := templates.TmplText(ctx, fs.tmpl, alerts, fs.log, &tmplErr)
@@ -339,7 +344,12 @@ func (fs *Notifier) buildBody(ctx context.Context, alerts ...*types.Alert) (stri
 
 	card.Elements = contents
 
-	p, err := json.Marshal(card)
+	post := &feishuPost{
+		MessageType: fs.settings.MessageType,
+		Card:        card,
+	}
+
+	p, err := json.Marshal(post)
 
 	if err != nil {
 		return "", err

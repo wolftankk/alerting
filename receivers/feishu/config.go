@@ -20,7 +20,7 @@ type Config struct {
 	MentionUsers receivers.CommaSeparatedStrings `json:"mentionUsers,omitempty" yaml:"mentionUsers,omitempty"`
 }
 
-const defaultFeishuMsgType = "post"
+const defaultFeishuMsgType = "interactive"
 
 func NewConfig(jsonData json.RawMessage, decryptFn receivers.DecryptFunc) (Config, error) {
 	var settings Config
