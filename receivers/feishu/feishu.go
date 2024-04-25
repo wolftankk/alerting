@@ -176,10 +176,12 @@ func (fs *Notifier) getTenantAccessToken() (string, error) {
 }
 
 func (fs *Notifier) Notify(ctx context.Context, alerts ...*types.Alert) (bool, error) {
-	fs.log.New("sending feishu")
+	fs.log.Info("sending feishu")
 
 	//build message
 	body, err := fs.buildBody(ctx, alerts...)
+
+	fs.log.Info("feishu body ", body)
 	if err != nil {
 		fs.log.Error("gen feishu body faield.", "error", err)
 		return false, err
