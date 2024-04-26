@@ -311,7 +311,8 @@ func (fs *Notifier) buildBody(ctx context.Context, alerts ...*types.Alert) (stri
 		})
 
 		return nil
-	})
+
+	}, alerts...)
 
 	if len(imageContents) > 0 {
 		contents = append(contents, feishuImageList{
