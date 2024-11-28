@@ -11,21 +11,17 @@ import (
 	"os"
 	"time"
 
-	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
-
-	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
-
-	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
-
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
 	"github.com/grafana/alerting/templates"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/prometheus/alertmanager/types"
+	"github.com/prometheus/common/model"
 )
-
-const feishuAPIURL = "https://open.feishu.cn/open-apis"
 
 var (
 	feishuClient = &http.Client{
@@ -136,25 +132,16 @@ func (fs *Notifier) getUserIDs(emails []string) ([]string, error) {
 	return userIds, nil
 }
 
-func (fs *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
-	fs.log.New("sending feishu")
-
-	var tmplErr error
-	tmpl, _ := templates.TmplText(ctx, fs.tmpl, as, fs.log, &tmplErr)
-
-	message := tmpl(fs.settings.Message)
-	title := tmpl(fs.settings.Title)
+func (fs *Notifier) Notify(ctx context.Context, alerts ...*types.Alert) (bool, error) {
+	fs.log.Info("sending feishu")
 
 	//build message
-	body, err := fs.buildBody(ctx, title, message)
+	body, err := fs.buildBody(ctx, alerts...)
+
+	fs.log.Info("feishu body ", body)
 	if err != nil {
 		fs.log.Error("gen feishu body faield.", "error", err)
 		return false, err
-	}
-
-	if tmplErr != nil {
-		fs.log.Warn("failed to template Feishu message", "error", tmplErr.Error())
-		tmplErr = nil
 	}
 
 	cmd := &receivers.SendWebhookSettings{
@@ -175,40 +162,105 @@ func (fs *Notifier) SendResolved() bool {
 	return !fs.GetDisableResolveMessage()
 }
 
-type feishuTextContent struct {
-	Tag      string `json:"tag"`
-	Text     string `json:"text"`
-	Unescape bool   `json:"un_escape"`
+type feishuCard struct {
+	Header   *feishuHeader   `json:"header"`
+	CardLink *feishuCardLink `json:"card_link,omitempty"`
+	Elements any             `json:"elements"`
 }
 
-type feishuLinkContent struct {
-	Tag  string `json:"tag"`
-	Text string `json:"text"`
-	Link string `json:"href"`
+type feishuCardLink struct {
+	Url string `json:"url"`
 }
 
-type feishuImageContent struct {
-	Tag      string `json:"tag"`
-	ImageKey string `json:"image_key"`
+type feishuHeader struct {
+	Title    *feishuPlainText  `json:"title"`
+	Template string            `json:"template,omitempty"`
+	Icon     *feishuHeaderIcon `json:"ud_icon,omitempty"`
 }
 
-type feishuContent struct {
-	MessageType string      `json:"msg_type"`
-	Content     interface{} `json:"content"`
+type feishuHeaderIcon struct {
+	Token string `json:"token"`
+}
+
+type feishuPlainText struct {
+	Tag     string `json:"tag"`
+	Content string `json:"content"`
+}
+
+type feishuImageList struct {
+	Tag             string               `json:"tag"`
+	CombinationMode string               `json:"combination_mode"`
+	ImageList       []feishuImageElement `json:"img_list"`
+}
+
+type feishuImageElement struct {
+	ImageKey string `json:"img_key"`
 }
 
 type feishuPost struct {
-	Title   string        `json:"title"`
-	Content []interface{} `json:"content"`
+	MessageType string      `json:"msg_type"`
+	Card        *feishuCard `json:"card"`
 }
 
-type feishuAt struct {
+type feishuMention struct {
 	Tag    string `json:"tag"`
 	UserId string `json:"user_id"`
 }
 
-func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, error) {
-	var imageContents = make([]interface{}, 0)
+func (fs *Notifier) buildBody(ctx context.Context, alerts ...*types.Alert) (string, error) {
+	var tmplErr error
+	tmpl, _ := templates.TmplText(ctx, fs.tmpl, alerts, fs.log, &tmplErr)
+
+	message := tmpl(fs.settings.Message)
+	title := tmpl(fs.settings.Title)
+
+	if tmplErr != nil {
+		fs.log.Warn("failed to template Feishu message", "error", tmplErr.Error())
+		tmplErr = nil
+	}
+
+	alertStatus := types.Alerts(alerts...).Status()
+
+	card := &feishuCard{}
+
+	header := &feishuHeader{
+		Title: &feishuPlainText{
+			Tag:     "plain_text",
+			Content: title,
+		},
+		Template: "default",
+	}
+
+	if alertStatus == model.AlertFiring {
+		header.Template = "red"
+		header.Icon = &feishuHeaderIcon{
+			Token: "warning_outlined",
+		}
+	} else if alertStatus == model.AlertResolved {
+		header.Template = "green"
+		header.Icon = &feishuHeaderIcon{
+			Token: "resolve_outlined",
+		}
+	}
+
+	card.Header = header
+
+	//ruleURL := receivers.JoinURLPath(fs.tmpl.ExternalURL.String(), "/alerting/list", fs.log)
+	//if len(ruleURL) > 0 {
+	//	card.CardLink = &feishuCardLink{
+	//		Url: ruleURL,
+	//	}
+	//}
+
+	contents := make([]interface{}, 0)
+	if len(message) > 0 {
+		contents = append(contents, feishuPlainText{
+			Tag:     "markdown",
+			Content: message,
+		})
+	}
+
+	var imageContents = make([]feishuImageElement, 0)
 	_ = images.WithStoredImages(ctx, fs.log, fs.images, func(idx int, img images.Image) error {
 		var imageID, err = fs.uploadImage(img.Path)
 		if err != nil {
@@ -216,44 +268,33 @@ func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, e
 			return nil
 		}
 
-		imageContents = append(imageContents, feishuImageContent{
-			Tag:      "img",
+		imageContents = append(imageContents, feishuImageElement{
 			ImageKey: imageID,
 		})
 
 		return nil
-	})
-
-	contents := make([]interface{}, 0)
-
-	if len(msg) > 0 {
-		subContents := make([]interface{}, 0)
-		subContents = append(subContents, feishuTextContent{
-			Tag:  "text",
-			Text: msg,
-		})
-
-		contents = append(contents, subContents)
-	}
+	}, alerts...)
 
 	if len(imageContents) > 0 {
-		contents = append(contents, imageContents)
+		contents = append(contents, feishuImageList{
+			Tag:             "img_combination",
+			CombinationMode: "bisect",
+			ImageList:       imageContents,
+		})
 	}
 
-	ruleURL := receivers.JoinURLPath(fs.tmpl.ExternalURL.String(), "/alerting/list", fs.log)
-	if len(ruleURL) > 0 {
-		subContents := make([]interface{}, 0)
-
-		subContents = append(subContents, feishuLinkContent{
-			Tag:  "a",
-			Text: "Alerting list",
-			Link: ruleURL,
-		})
-
-		contents = append(contents, subContents)
+	appendSpace := func() {
+		if len(contents) > 0 {
+			contents = append(contents, struct {
+				Tag string `json:"tag"`
+			}{
+				Tag: "hr",
+			})
+		}
 	}
 
 	if len(fs.settings.MentionUsers) > 0 {
+		appendSpace()
 
 		mentionUsers, err := fs.getUserIDs(fs.settings.MentionUsers)
 		if err != nil {
@@ -262,7 +303,7 @@ func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, e
 			subContents := make([]interface{}, len(mentionUsers))
 
 			for idx, userId := range mentionUsers {
-				subContents[idx] = feishuAt{
+				subContents[idx] = feishuMention{
 					Tag:    "at",
 					UserId: userId,
 				}
@@ -270,18 +311,14 @@ func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, e
 
 			contents = append(contents, subContents)
 		}
+
 	}
 
-	post := feishuContent{
-		MessageType: "post",
-		Content: map[string]interface{}{
-			"post": map[string]feishuPost{
-				"zh_cn": {
-					Title:   title,
-					Content: contents,
-				},
-			},
-		},
+	card.Elements = contents
+
+	post := &feishuPost{
+		MessageType: fs.settings.MessageType,
+		Card:        card,
 	}
 
 	p, err := json.Marshal(post)
