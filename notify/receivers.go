@@ -7,15 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
-
-	"github.com/prometheus/alertmanager/config"
-	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/types"
-	"github.com/prometheus/common/model"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/grafana/alerting/receivers"
 	"github.com/grafana/alerting/receivers/alertmanager"
@@ -26,12 +19,14 @@ import (
 	"github.com/grafana/alerting/receivers/googlechat"
 	"github.com/grafana/alerting/receivers/kafka"
 	"github.com/grafana/alerting/receivers/line"
+	"github.com/grafana/alerting/receivers/mqtt"
 	"github.com/grafana/alerting/receivers/oncall"
 	"github.com/grafana/alerting/receivers/opsgenie"
 	"github.com/grafana/alerting/receivers/pagerduty"
 	"github.com/grafana/alerting/receivers/pushover"
 	"github.com/grafana/alerting/receivers/sensugo"
 	"github.com/grafana/alerting/receivers/slack"
+	"github.com/grafana/alerting/receivers/sns"
 	"github.com/grafana/alerting/receivers/teams"
 	"github.com/grafana/alerting/receivers/telegram"
 	"github.com/grafana/alerting/receivers/threema"
@@ -39,8 +34,10 @@ import (
 	"github.com/grafana/alerting/receivers/webex"
 	"github.com/grafana/alerting/receivers/webhook"
 	"github.com/grafana/alerting/receivers/wecom"
-
-	"github.com/grafana/alerting/templates"
+	"github.com/prometheus/alertmanager/config"
+	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/types"
+	"github.com/prometheus/common/model"
 )
 
 const (
@@ -52,30 +49,30 @@ var (
 )
 
 type TestReceiversResult struct {
-	Alert     types.Alert
-	Receivers []TestReceiverResult
-	NotifedAt time.Time
+	Alert     types.Alert          `json:"alert"`
+	Receivers []TestReceiverResult `json:"receivers"`
+	NotifedAt time.Time            `json:"notifiedAt"`
 }
 
 type TestReceiverResult struct {
-	Name    string
-	Configs []TestIntegrationConfigResult
+	Name    string                        `json:"name"`
+	Configs []TestIntegrationConfigResult `json:"configs"`
 }
 
 type TestIntegrationConfigResult struct {
-	Name   string
-	UID    string
-	Status string
-	Error  error
+	Name   string `json:"name"`
+	UID    string `json:"uid"`
+	Status string `json:"status"`
+	Error  string `json:"error"`
 }
 
 type GrafanaIntegrationConfig struct {
-	UID                   string            `json:"uid"`
-	Name                  string            `json:"name"`
-	Type                  string            `json:"type"`
-	DisableResolveMessage bool              `json:"disableResolveMessage"`
-	Settings              json.RawMessage   `json:"settings"`
-	SecureSettings        map[string]string `json:"secureSettings"`
+	UID                   string            `json:"uid" yaml:"uid"`
+	Name                  string            `json:"name" yaml:"name"`
+	Type                  string            `json:"type" yaml:"type"`
+	DisableResolveMessage bool              `json:"disableResolveMessage" yaml:"disableResolveMessage"`
+	Settings              json.RawMessage   `json:"settings" yaml:"settings"`
+	SecureSettings        map[string]string `json:"secureSettings" yaml:"secureSettings"`
 }
 
 type ConfigReceiver = config.Receiver
@@ -108,166 +105,17 @@ func (e IntegrationTimeoutError) Error() string {
 	return fmt.Sprintf("the receiver timed out: %s", e.Err)
 }
 
-func (am *GrafanaAlertmanager) TestReceivers(ctx context.Context, c TestReceiversConfigBodyParams) (*TestReceiversResult, error) {
-	// now represents the start time of the test
-	now := time.Now()
-	testAlert := newTestAlert(c, now, now)
+func (am *GrafanaAlertmanager) TestReceivers(ctx context.Context, c TestReceiversConfigBodyParams) (*TestReceiversResult, int, error) {
+	am.reloadConfigMtx.RLock()
 
-	tmpl, err := am.getTemplate()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get template: %w", err)
+	tmpls := make([]string, 0, len(am.templates))
+	for _, tc := range am.templates {
+		tmpls = append(tmpls, tc.Template)
 	}
 
-	// job contains all metadata required to test a receiver
-	type job struct {
-		Config       *GrafanaIntegrationConfig
-		ReceiverName string
-		Notifier     notify.Notifier
-	}
+	am.reloadConfigMtx.RUnlock()
 
-	// result contains the receiver that was tested and an error that is non-nil if the test failed
-	type result struct {
-		Config       *GrafanaIntegrationConfig
-		ReceiverName string
-		Error        error
-	}
-
-	newTestReceiversResult := func(alert types.Alert, results []result, notifiedAt time.Time) *TestReceiversResult {
-		m := make(map[string]TestReceiverResult)
-		for _, receiver := range c.Receivers {
-			// set up the result for this receiver
-			m[receiver.Name] = TestReceiverResult{
-				Name: receiver.Name,
-				// A Grafana receiver can have multiple nested receivers
-				Configs: make([]TestIntegrationConfigResult, 0, len(receiver.Integrations)),
-			}
-		}
-		for _, next := range results {
-			tmp := m[next.ReceiverName]
-			status := "ok"
-			if next.Error != nil {
-				status = "failed"
-			}
-			tmp.Configs = append(tmp.Configs, TestIntegrationConfigResult{
-				Name:   next.Config.Name,
-				UID:    next.Config.UID,
-				Status: status,
-				Error:  ProcessIntegrationError(next.Config, next.Error),
-			})
-			m[next.ReceiverName] = tmp
-		}
-		v := new(TestReceiversResult)
-		v.Alert = alert
-		v.Receivers = make([]TestReceiverResult, 0, len(c.Receivers))
-		v.NotifedAt = notifiedAt
-		for _, next := range m {
-			v.Receivers = append(v.Receivers, next)
-		}
-
-		// Make sure the return order is deterministic.
-		sort.Slice(v.Receivers, func(i, j int) bool {
-			return v.Receivers[i].Name < v.Receivers[j].Name
-		})
-
-		return v
-	}
-
-	// invalid keeps track of all invalid receiver configurations
-	invalid := make([]result, 0, len(c.Receivers))
-	// jobs keeps track of all receivers that need to be sent test notifications
-	jobs := make([]job, 0, len(c.Receivers))
-
-	for _, receiver := range c.Receivers {
-		for _, next := range receiver.Integrations {
-			n, err := am.buildSingleIntegration(next, tmpl)
-			if err != nil {
-				invalid = append(invalid, result{
-					Config:       next,
-					ReceiverName: next.Name,
-					Error:        err,
-				})
-			} else {
-				jobs = append(jobs, job{
-					Config:       next,
-					ReceiverName: receiver.Name,
-					Notifier:     n,
-				})
-			}
-		}
-	}
-
-	if len(invalid)+len(jobs) == 0 {
-		return nil, ErrNoReceivers
-	}
-
-	if len(jobs) == 0 {
-		return newTestReceiversResult(testAlert, invalid, now), nil
-	}
-
-	numWorkers := maxTestReceiversWorkers
-	if numWorkers > len(jobs) {
-		numWorkers = len(jobs)
-	}
-
-	resultCh := make(chan result, len(jobs))
-	workCh := make(chan job, len(jobs))
-	for _, job := range jobs {
-		workCh <- job
-	}
-	close(workCh)
-
-	g, ctx := errgroup.WithContext(ctx)
-	for i := 0; i < numWorkers; i++ {
-		g.Go(func() error {
-			for next := range workCh {
-				ctx = notify.WithGroupKey(ctx, fmt.Sprintf("%s-%s-%d",
-					next.ReceiverName,
-					testAlert.Labels.Fingerprint(),
-					now.Unix()))
-				ctx = notify.WithGroupLabels(ctx, testAlert.Labels)
-				ctx = notify.WithReceiverName(ctx, next.ReceiverName)
-				v := result{
-					Config:       next.Config,
-					ReceiverName: next.ReceiverName,
-				}
-				if _, err := next.Notifier.Notify(ctx, &testAlert); err != nil {
-					v.Error = err
-				}
-				resultCh <- v
-			}
-			return nil
-		})
-	}
-	err = g.Wait() // nolint
-	close(resultCh)
-
-	if err != nil {
-		return nil, err
-	}
-
-	results := make([]result, 0, len(jobs))
-	for next := range resultCh {
-		results = append(results, next)
-	}
-
-	return newTestReceiversResult(testAlert, append(invalid, results...), now), nil
-}
-
-func (am *GrafanaAlertmanager) buildSingleIntegration(r *GrafanaIntegrationConfig, tmpl *templates.Template) (*Integration, error) {
-	apiReceiver := &APIReceiver{
-		GrafanaIntegrations: GrafanaIntegrations{
-			Integrations: []*GrafanaIntegrationConfig{r},
-		},
-	}
-	integrations, err := am.buildReceiverIntegrationsFunc(apiReceiver, tmpl)
-	if err != nil {
-		return nil, err
-	}
-	if len(integrations) == 0 {
-		// This should not happen, but it is better to return some error rather than having a panic.
-		return nil, errors.New("failed to build integration")
-	}
-	return integrations[0], nil
+	return TestReceivers(ctx, c, tmpls, am.buildReceiverIntegrationsFunc, am.ExternalURL())
 }
 
 func newTestAlert(c TestReceiversConfigBodyParams, startsAt, updatedAt time.Time) types.Alert {
@@ -343,11 +191,13 @@ type GrafanaReceiverConfig struct {
 	KafkaConfigs        []*NotifierConfig[kafka.Config]
 	LineConfigs         []*NotifierConfig[line.Config]
 	OpsgenieConfigs     []*NotifierConfig[opsgenie.Config]
+	MqttConfigs         []*NotifierConfig[mqtt.Config]
 	PagerdutyConfigs    []*NotifierConfig[pagerduty.Config]
 	OnCallConfigs       []*NotifierConfig[oncall.Config]
 	PushoverConfigs     []*NotifierConfig[pushover.Config]
 	SensugoConfigs      []*NotifierConfig[sensugo.Config]
 	SlackConfigs        []*NotifierConfig[slack.Config]
+	SNSConfigs          []*NotifierConfig[sns.Config]
 	TeamsConfigs        []*NotifierConfig[teams.Config]
 	TelegramConfigs     []*NotifierConfig[telegram.Config]
 	ThreemaConfigs      []*NotifierConfig[threema.Config]
@@ -367,6 +217,14 @@ type NotifierConfig[T interface{}] struct {
 // GetDecryptedValueFn is a function that returns the decrypted value of
 // the given key. If the key is not present, then it returns the fallback value.
 type GetDecryptedValueFn func(ctx context.Context, sjd map[string][]byte, key string, fallback string) string
+
+// NoopDecrypt is a GetDecryptedValueFn that returns a value without decrypting it.
+func NoopDecrypt(_ context.Context, sjd map[string][]byte, key string, fallback string) string {
+	if v, ok := sjd[key]; ok {
+		return string(v)
+	}
+	return fallback
+}
 
 // BuildReceiverConfiguration parses, decrypts and validates the APIReceiver.
 func BuildReceiverConfiguration(ctx context.Context, api *APIReceiver, decrypt GetDecryptedValueFn) (GrafanaReceiverConfig, error) {
@@ -389,7 +247,11 @@ func BuildReceiverConfiguration(ctx context.Context, api *APIReceiver, decrypt G
 func parseNotifier(ctx context.Context, result *GrafanaReceiverConfig, receiver *GrafanaIntegrationConfig, decrypt GetDecryptedValueFn) error {
 	secureSettings, err := decodeSecretsFromBase64(receiver.SecureSettings)
 	if err != nil {
-		return err
+		// An error means that the secure settings are not base-64 encoded.
+		secureSettings = make(map[string][]byte, len(receiver.SecureSettings))
+		for k, v := range receiver.SecureSettings {
+			secureSettings[k] = []byte(v)
+		}
 	}
 
 	decryptFn := func(key string, fallback string) string {
@@ -422,7 +284,7 @@ func parseNotifier(ctx context.Context, result *GrafanaReceiverConfig, receiver 
 		}
 		result.EmailConfigs = append(result.EmailConfigs, newNotifierConfig(receiver, cfg))
 	case "googlechat":
-		cfg, err := googlechat.NewConfig(receiver.Settings)
+		cfg, err := googlechat.NewConfig(receiver.Settings, decryptFn)
 		if err != nil {
 			return err
 		}
@@ -439,6 +301,12 @@ func parseNotifier(ctx context.Context, result *GrafanaReceiverConfig, receiver 
 			return err
 		}
 		result.LineConfigs = append(result.LineConfigs, newNotifierConfig(receiver, cfg))
+	case "mqtt":
+		cfg, err := mqtt.NewConfig(receiver.Settings, decryptFn)
+		if err != nil {
+			return err
+		}
+		result.MqttConfigs = append(result.MqttConfigs, newNotifierConfig(receiver, cfg))
 	case "opsgenie":
 		cfg, err := opsgenie.NewConfig(receiver.Settings, decryptFn)
 		if err != nil {
@@ -475,6 +343,12 @@ func parseNotifier(ctx context.Context, result *GrafanaReceiverConfig, receiver 
 			return err
 		}
 		result.SlackConfigs = append(result.SlackConfigs, newNotifierConfig(receiver, cfg))
+	case "sns":
+		cfg, err := sns.NewConfig(receiver.Settings, decryptFn)
+		if err != nil {
+			return err
+		}
+		result.SNSConfigs = append(result.SNSConfigs, newNotifierConfig(receiver, cfg))
 	case "teams":
 		cfg, err := teams.NewConfig(receiver.Settings)
 		if err != nil {
@@ -542,6 +416,17 @@ func decodeSecretsFromBase64(secrets map[string]string) (map[string][]byte, erro
 		secureSettings[k] = d
 	}
 	return secureSettings, nil
+}
+
+// GetActiveReceiversMap returns all receivers that are in use by a route.
+func GetActiveReceiversMap(r *dispatch.Route) map[string]struct{} {
+	receiversMap := make(map[string]struct{})
+	visitFunc := func(r *dispatch.Route) {
+		receiversMap[r.RouteOpts.Receiver] = struct{}{}
+	}
+	r.Walk(visitFunc)
+
+	return receiversMap
 }
 
 func newNotifierConfig[T interface{}](receiver *GrafanaIntegrationConfig, settings T) *NotifierConfig[T] {

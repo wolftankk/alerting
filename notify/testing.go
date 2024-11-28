@@ -17,11 +17,13 @@ import (
 	"github.com/grafana/alerting/receivers/googlechat"
 	"github.com/grafana/alerting/receivers/kafka"
 	"github.com/grafana/alerting/receivers/line"
+	"github.com/grafana/alerting/receivers/mqtt"
 	"github.com/grafana/alerting/receivers/opsgenie"
 	"github.com/grafana/alerting/receivers/pagerduty"
 	"github.com/grafana/alerting/receivers/pushover"
 	"github.com/grafana/alerting/receivers/sensugo"
 	"github.com/grafana/alerting/receivers/slack"
+	"github.com/grafana/alerting/receivers/sns"
 	"github.com/grafana/alerting/receivers/teams"
 	"github.com/grafana/alerting/receivers/telegram"
 	receiversTesting "github.com/grafana/alerting/receivers/testing"
@@ -134,7 +136,8 @@ var AllKnownConfigsForTesting = map[string]NotifierConfigTest{
 		Config: email.FullValidConfigForTesting,
 	},
 	"googlechat": {NotifierType: "googlechat",
-		Config: googlechat.FullValidConfigForTesting,
+		Config:  googlechat.FullValidConfigForTesting,
+		Secrets: googlechat.FullValidSecretsForTesting,
 	},
 	"kafka": {NotifierType: "kafka",
 		Config:  kafka.FullValidConfigForTesting,
@@ -143,6 +146,10 @@ var AllKnownConfigsForTesting = map[string]NotifierConfigTest{
 	"line": {NotifierType: "line",
 		Config:  line.FullValidConfigForTesting,
 		Secrets: line.FullValidSecretsForTesting,
+	},
+	"mqtt": {NotifierType: "mqtt",
+		Config:  mqtt.FullValidConfigForTesting,
+		Secrets: mqtt.FullValidSecretsForTesting,
 	},
 	"opsgenie": {NotifierType: "opsgenie",
 		Config:  opsgenie.FullValidConfigForTesting,
@@ -163,6 +170,9 @@ var AllKnownConfigsForTesting = map[string]NotifierConfigTest{
 	"slack": {NotifierType: "slack",
 		Config:  slack.FullValidConfigForTesting,
 		Secrets: slack.FullValidSecretsForTesting,
+	},
+	"sns": {NotifierType: "sns",
+		Config: sns.FullValidConfigForTesting,
 	},
 	"teams": {NotifierType: "teams",
 		Config: teams.FullValidConfigForTesting,

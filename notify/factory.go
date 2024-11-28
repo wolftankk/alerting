@@ -18,12 +18,14 @@ import (
 	"github.com/grafana/alerting/receivers/googlechat"
 	"github.com/grafana/alerting/receivers/kafka"
 	"github.com/grafana/alerting/receivers/line"
+	"github.com/grafana/alerting/receivers/mqtt"
 	"github.com/grafana/alerting/receivers/oncall"
 	"github.com/grafana/alerting/receivers/opsgenie"
 	"github.com/grafana/alerting/receivers/pagerduty"
 	"github.com/grafana/alerting/receivers/pushover"
 	"github.com/grafana/alerting/receivers/sensugo"
 	"github.com/grafana/alerting/receivers/slack"
+	"github.com/grafana/alerting/receivers/sns"
 	"github.com/grafana/alerting/receivers/teams"
 	"github.com/grafana/alerting/receivers/telegram"
 	"github.com/grafana/alerting/receivers/threema"
@@ -97,6 +99,9 @@ func BuildReceiverIntegrations(
 	for i, cfg := range receiver.LineConfigs {
 		ci(i, cfg.Metadata, line.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), nl(cfg.Metadata)))
 	}
+	for i, cfg := range receiver.MqttConfigs {
+		ci(i, cfg.Metadata, mqtt.New(cfg.Settings, cfg.Metadata, tmpl, nl(cfg.Metadata), nil))
+	}
 	for i, cfg := range receiver.OnCallConfigs {
 		ci(i, cfg.Metadata, oncall.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata), orgID))
 	}
@@ -111,6 +116,9 @@ func BuildReceiverIntegrations(
 	}
 	for i, cfg := range receiver.SensugoConfigs {
 		ci(i, cfg.Metadata, sensugo.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata)))
+	}
+	for i, cfg := range receiver.SNSConfigs {
+		ci(i, cfg.Metadata, sns.New(cfg.Settings, cfg.Metadata, tmpl, nl(cfg.Metadata)))
 	}
 	for i, cfg := range receiver.SlackConfigs {
 		ci(i, cfg.Metadata, slack.New(cfg.Settings, cfg.Metadata, tmpl, nw(cfg.Metadata), img, nl(cfg.Metadata), version))

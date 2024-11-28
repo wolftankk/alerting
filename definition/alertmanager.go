@@ -1,11 +1,14 @@
 package definition
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/pkg/labels"
@@ -22,7 +25,7 @@ type Config struct {
 	// MuteTimeIntervals is deprecated and will be removed before Alertmanager 1.0.
 	MuteTimeIntervals []config.MuteTimeInterval `yaml:"mute_time_intervals,omitempty" json:"mute_time_intervals,omitempty"`
 	TimeIntervals     []config.TimeInterval     `yaml:"time_intervals,omitempty" json:"time_intervals,omitempty"`
-	Templates         []string                  `yaml:"templates" json:"templates"`
+	Templates         []string                  `yaml:"templates,omitempty" json:"templates,omitempty"`
 }
 
 // A Route is a node that contains definitions of how to handle alerts. This is modified
@@ -36,12 +39,13 @@ type Route struct {
 	// Deprecated. Remove before v1.0 release.
 	Match map[string]string `yaml:"match,omitempty" json:"match,omitempty"`
 	// Deprecated. Remove before v1.0 release.
-	MatchRE           config.MatchRegexps `yaml:"match_re,omitempty" json:"match_re,omitempty"`
-	Matchers          config.Matchers     `yaml:"matchers,omitempty" json:"matchers,omitempty"`
-	ObjectMatchers    ObjectMatchers      `yaml:"object_matchers,omitempty" json:"object_matchers,omitempty"`
-	MuteTimeIntervals []string            `yaml:"mute_time_intervals,omitempty" json:"mute_time_intervals,omitempty"`
-	Continue          bool                `yaml:"continue" json:"continue,omitempty"`
-	Routes            []*Route            `yaml:"routes,omitempty" json:"routes,omitempty"`
+	MatchRE             config.MatchRegexps `yaml:"match_re,omitempty" json:"match_re,omitempty"`
+	Matchers            config.Matchers     `yaml:"matchers,omitempty" json:"matchers,omitempty"`
+	ObjectMatchers      ObjectMatchers      `yaml:"object_matchers,omitempty" json:"object_matchers,omitempty"`
+	MuteTimeIntervals   []string            `yaml:"mute_time_intervals,omitempty" json:"mute_time_intervals,omitempty"`
+	ActiveTimeIntervals []string            `yaml:"active_time_intervals,omitempty" json:"active_time_intervals,omitempty"`
+	Continue            bool                `yaml:"continue" json:"continue,omitempty"`
+	Routes              []*Route            `yaml:"routes,omitempty" json:"routes,omitempty"`
 
 	GroupWait      *model.Duration `yaml:"group_wait,omitempty" json:"group_wait,omitempty"`
 	GroupInterval  *model.Duration `yaml:"group_interval,omitempty" json:"group_interval,omitempty"`
@@ -63,15 +67,16 @@ func (r *Route) UnmarshalYAML(unmarshal func(interface{}) error) error {
 // AsAMRoute returns an Alertmanager route from a Grafana route. The ObjectMatchers are converted to Matchers.
 func (r *Route) AsAMRoute() *config.Route {
 	amRoute := &config.Route{
-		Receiver:          r.Receiver,
-		GroupByStr:        r.GroupByStr,
-		GroupBy:           r.GroupBy,
-		GroupByAll:        r.GroupByAll,
-		Match:             r.Match,
-		MatchRE:           r.MatchRE,
-		Matchers:          append(r.Matchers, r.ObjectMatchers...),
-		MuteTimeIntervals: r.MuteTimeIntervals,
-		Continue:          r.Continue,
+		Receiver:            r.Receiver,
+		GroupByStr:          r.GroupByStr,
+		GroupBy:             r.GroupBy,
+		GroupByAll:          r.GroupByAll,
+		Match:               r.Match,
+		MatchRE:             r.MatchRE,
+		Matchers:            append(r.Matchers, r.ObjectMatchers...),
+		MuteTimeIntervals:   r.MuteTimeIntervals,
+		ActiveTimeIntervals: r.ActiveTimeIntervals,
+		Continue:            r.Continue,
 
 		GroupWait:      r.GroupWait,
 		GroupInterval:  r.GroupInterval,
@@ -89,15 +94,16 @@ func (r *Route) AsAMRoute() *config.Route {
 // AsGrafanaRoute returns a Grafana route from an Alertmanager route.
 func AsGrafanaRoute(r *config.Route) *Route {
 	gRoute := &Route{
-		Receiver:          r.Receiver,
-		GroupByStr:        r.GroupByStr,
-		GroupBy:           r.GroupBy,
-		GroupByAll:        r.GroupByAll,
-		Match:             r.Match,
-		MatchRE:           r.MatchRE,
-		Matchers:          r.Matchers,
-		MuteTimeIntervals: r.MuteTimeIntervals,
-		Continue:          r.Continue,
+		Receiver:            r.Receiver,
+		GroupByStr:          r.GroupByStr,
+		GroupBy:             r.GroupBy,
+		GroupByAll:          r.GroupByAll,
+		Match:               r.Match,
+		MatchRE:             r.MatchRE,
+		Matchers:            r.Matchers,
+		MuteTimeIntervals:   r.MuteTimeIntervals,
+		ActiveTimeIntervals: r.ActiveTimeIntervals,
+		Continue:            r.Continue,
 
 		GroupWait:      r.GroupWait,
 		GroupInterval:  r.GroupInterval,
@@ -125,17 +131,13 @@ func (r *Route) ResourceID() string {
 // post-validation is included in the UnmarshalYAML method. Here we simply run this with
 // a noop unmarshaling function in order to benefit from said validation.
 func (c *Config) UnmarshalJSON(b []byte) error {
+	return yaml.Unmarshal(b, c)
+}
+
+func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	type plain Config
-	if err := json.Unmarshal(b, (*plain)(c)); err != nil {
+	if err := unmarshal((*plain)(c)); err != nil {
 		return err
-	}
-
-	noopUnmarshal := func(_ interface{}) error { return nil }
-
-	if c.Global != nil {
-		if err := c.Global.UnmarshalYAML(noopUnmarshal); err != nil {
-			return err
-		}
 	}
 
 	if c.Route == nil {
@@ -148,7 +150,7 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 	}
 
 	for _, r := range c.InhibitRules {
-		if err := r.UnmarshalYAML(noopUnmarshal); err != nil {
+		if err := r.UnmarshalYAML(unmarshal); err != nil {
 			return err
 		}
 	}
@@ -176,19 +178,23 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 }
 
 func checkTimeInterval(r *Route, timeIntervals map[string]struct{}) error {
+	for _, mt := range r.MuteTimeIntervals {
+		if _, ok := timeIntervals[mt]; !ok {
+			return fmt.Errorf("undefined mute time interval %q used in route", mt)
+		}
+	}
+	for _, mt := range r.ActiveTimeIntervals {
+		if _, ok := timeIntervals[mt]; !ok {
+			return fmt.Errorf("undefined active time interval %q used in route", mt)
+		}
+	}
+
 	for _, sr := range r.Routes {
 		if err := checkTimeInterval(sr, timeIntervals); err != nil {
 			return err
 		}
 	}
-	if len(r.MuteTimeIntervals) == 0 {
-		return nil
-	}
-	for _, mt := range r.MuteTimeIntervals {
-		if _, ok := timeIntervals[mt]; !ok {
-			return fmt.Errorf("undefined time interval %q used in route", mt)
-		}
-	}
+
 	return nil
 }
 
@@ -198,6 +204,15 @@ type PostableApiAlertingConfig struct {
 
 	// Override with our superset receiver type
 	Receivers []*PostableApiReceiver `yaml:"receivers,omitempty" json:"receivers,omitempty"`
+}
+
+// Load parses a slice of bytes (json/yaml) into a configuration and validates it.
+func Load(rawCfg []byte) (*PostableApiAlertingConfig, error) {
+	var cfg PostableApiAlertingConfig
+	if err := yaml.Unmarshal(rawCfg, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 func (c *PostableApiAlertingConfig) GetReceivers() []*PostableApiReceiver {
@@ -215,27 +230,31 @@ func (c *PostableApiAlertingConfig) GetRoute() *Route {
 }
 
 func (c *PostableApiAlertingConfig) UnmarshalJSON(b []byte) error {
+	return yaml.Unmarshal(b, c)
+}
+
+func (c *PostableApiAlertingConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	type plain PostableApiAlertingConfig
-	if err := json.Unmarshal(b, (*plain)(c)); err != nil {
+	if err := unmarshal((*plain)(c)); err != nil {
 		return err
 	}
 
-	// Since Config implements json.Unmarshaler, we must handle _all_ other fields independently.
+	// Since Config implements yaml.Unmarshaler, we must handle _all_ other fields independently.
 	// Otherwise, the json decoder will detect this and only use the embedded type.
 	// Additionally, we'll use pointers to slices in order to reference the intended target.
 	type overrides struct {
-		Receivers *[]*PostableApiReceiver `yaml:"receivers,omitempty" json:"receivers,omitempty"`
+		Receivers *[]*PostableApiReceiver `yaml:"receivers" json:"receivers,omitempty"`
 	}
 
-	if err := json.Unmarshal(b, &overrides{Receivers: &c.Receivers}); err != nil {
+	if err := unmarshal(&overrides{Receivers: &c.Receivers}); err != nil {
 		return err
 	}
 
-	return c.validate()
+	return c.Validate()
 }
 
-// validate ensures that the two routing trees use the correct receiver types.
-func (c *PostableApiAlertingConfig) validate() error {
+// Validate ensures that the two routing trees use the correct receiver types.
+func (c *PostableApiAlertingConfig) Validate() error {
 	receivers := make(map[string]struct{}, len(c.Receivers))
 
 	var hasGrafReceivers, hasAMReceivers bool
@@ -255,19 +274,17 @@ func (c *PostableApiAlertingConfig) validate() error {
 		return fmt.Errorf("cannot mix Alertmanager & Grafana receiver types")
 	}
 
-	if hasGrafReceivers {
-		// Taken from https://github.com/prometheus/alertmanager/blob/master/config/config.go#L170-L191
-		// Check if we have a root route. We cannot check for it in the
-		// UnmarshalYAML method because it won't be called if the input is empty
-		// (e.g. the config file is empty or only contains whitespace).
-		if c.Route == nil {
-			return fmt.Errorf("no route provided in config")
-		}
+	// Taken from https://github.com/prometheus/alertmanager/blob/14cbe6301c732658d6fe877ec55ad5b738abcf06/config/config.go#L171-L192
+	// Check if we have a root route. We cannot check for it in the
+	// UnmarshalYAML method because it won't be called if the input is empty
+	// (e.g. the config file is empty or only contains whitespace).
+	if c.Route == nil {
+		return fmt.Errorf("no route provided in config")
+	}
 
-		// Check if continue in root route.
-		if c.Route.Continue {
-			return fmt.Errorf("cannot have continue in root route")
-		}
+	// Check if continue in root route.
+	if c.Route.Continue {
+		return fmt.Errorf("cannot have continue in root route")
 	}
 
 	for _, receiver := range AllReceivers(c.Route.AsAMRoute()) {
@@ -369,12 +386,12 @@ func (r RawMessage) MarshalYAML() (interface{}, error) {
 }
 
 type PostableGrafanaReceiver struct {
-	UID                   string            `json:"uid"`
-	Name                  string            `json:"name"`
-	Type                  string            `json:"type"`
-	DisableResolveMessage bool              `json:"disableResolveMessage"`
-	Settings              RawMessage        `json:"settings,omitempty"`
-	SecureSettings        map[string]string `json:"secureSettings"`
+	UID                   string            `json:"uid" yaml:"uid"`
+	Name                  string            `json:"name" yaml:"name"`
+	Type                  string            `json:"type" yaml:"type"`
+	DisableResolveMessage bool              `json:"disableResolveMessage" yaml:"disableResolveMessage"`
+	Settings              RawMessage        `json:"settings,omitempty" yaml:"settings,omitempty"`
+	SecureSettings        map[string]string `json:"secureSettings,omitempty" yaml:"secureSettings,omitempty"`
 }
 
 type ReceiverType int
@@ -524,21 +541,17 @@ type PostableApiReceiver struct {
 	PostableGrafanaReceivers `yaml:",inline"`
 }
 
+func (r *PostableApiReceiver) UnmarshalJSON(b []byte) error {
+	return yaml.Unmarshal(b, r)
+}
+
 func (r *PostableApiReceiver) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err := unmarshal(&r.PostableGrafanaReceivers); err != nil {
 		return err
 	}
 
-	if err := unmarshal(&r.Receiver); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r *PostableApiReceiver) UnmarshalJSON(b []byte) error {
-	type plain PostableApiReceiver
-	if err := json.Unmarshal(b, (*plain)(r)); err != nil {
+	type plain config.Receiver
+	if err := unmarshal((*plain)(&r.Receiver)); err != nil {
 		return err
 	}
 
@@ -593,4 +606,23 @@ func (r *PostableApiReceiver) GetName() string {
 
 type PostableGrafanaReceivers struct {
 	GrafanaManagedReceivers []*PostableGrafanaReceiver `yaml:"grafana_managed_receiver_configs,omitempty" json:"grafana_managed_receiver_configs,omitempty"`
+}
+
+// DecryptSecureSettings returns a map containing the decoded and decrypted secure settings.
+func (pgr *PostableGrafanaReceiver) DecryptSecureSettings(decryptFn func(payload []byte) ([]byte, error)) (map[string]string, error) {
+	decrypted := make(map[string]string, len(pgr.SecureSettings))
+	for k, v := range pgr.SecureSettings {
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode value for key '%s': %w", k, err)
+		}
+
+		b, err := decryptFn(decoded)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt value for key '%s': %w", k, err)
+		}
+
+		decrypted[k] = string(b)
+	}
+	return decrypted, nil
 }
