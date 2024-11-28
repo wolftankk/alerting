@@ -21,7 +21,7 @@ type Config struct {
 	MentionGroups receivers.CommaSeparatedStrings `json:"mentionGroups,omitempty" yaml:"mentionGroups,omitempty"`
 }
 
-const defaultFeishuMsgType = "post"
+const defaultFeishuMsgType = "interactive"
 
 func NewConfig(jsonData json.RawMessage, decryptFn receivers.DecryptFunc) (Config, error) {
 	var settings Config
@@ -47,9 +47,7 @@ func NewConfig(jsonData json.RawMessage, decryptFn receivers.DecryptFunc) (Confi
 		settings.Message = templates.DefaultMessageEmbed
 	}
 
-	if settings.MessageType == "" {
-		settings.MessageType = defaultFeishuMsgType
-	}
+	settings.MessageType = defaultFeishuMsgType
 
 	return settings, nil
 }
