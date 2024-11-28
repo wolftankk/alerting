@@ -11,13 +11,14 @@ import (
 )
 
 type Config struct {
-	URL          string                          `json:"url,omitempty" yaml:"url,omitempty"`
-	AppID        string                          `json:"appId,omitempty" yaml:"appId,omitempty"`
-	AppSecret    string                          `json:"appSecret,omitempty" yaml:"appSecret,omitempty"`
-	MessageType  string                          `json:"msgType,omitempty" yaml:"msgType,omitempty"`
-	Title        string                          `json:"title,omitempty" yaml:"title,omitempty"`
-	Message      string                          `json:"message,omitempty" yaml:"message,omitempty"`
-	MentionUsers receivers.CommaSeparatedStrings `json:"mentionUsers,omitempty" yaml:"mentionUsers,omitempty"`
+	URL           string                          `json:"url,omitempty" yaml:"url,omitempty"`
+	AppID         string                          `json:"appId,omitempty" yaml:"appId,omitempty"`
+	AppSecret     string                          `json:"appSecret,omitempty" yaml:"appSecret,omitempty"`
+	MessageType   string                          `json:"msgType,omitempty" yaml:"msgType,omitempty"`
+	Title         string                          `json:"title,omitempty" yaml:"title,omitempty"`
+	Message       string                          `json:"message,omitempty" yaml:"message,omitempty"`
+	MentionUsers  receivers.CommaSeparatedStrings `json:"mentionUsers,omitempty" yaml:"mentionUsers,omitempty"`
+	MentionGroups receivers.CommaSeparatedStrings `json:"mentionGroups,omitempty" yaml:"mentionGroups,omitempty"`
 }
 
 const defaultFeishuMsgType = "post"

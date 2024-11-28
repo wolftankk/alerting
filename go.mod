@@ -10,10 +10,10 @@ require (
 	github.com/at-wat/mqtt-go v0.19.4
 	github.com/aws/aws-sdk-go v1.50.29
 	github.com/benbjohnson/clock v1.3.5
-	github.com/bluele/gcache v0.0.2
 	github.com/go-kit/log v0.2.1
 	github.com/go-openapi/strfmt v0.22.0
 	github.com/google/go-cmp v0.6.0
+	github.com/larksuite/oapi-sdk-go/v3 v3.4.0
 	github.com/matttproud/golang_protobuf_extensions v1.0.4
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/alertmanager v0.25.0

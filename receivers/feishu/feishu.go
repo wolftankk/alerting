@@ -1,28 +1,46 @@
 package feishu
 
 import (
-	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/grafana/alerting/templates"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 
-	"github.com/bluele/gcache"
+	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
+
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+
 	"github.com/grafana/alerting/images"
 	"github.com/grafana/alerting/logging"
 	"github.com/grafana/alerting/receivers"
+	"github.com/grafana/alerting/templates"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/prometheus/alertmanager/types"
 )
 
+const feishuAPIURL = "https://open.feishu.cn/open-apis"
+
 var (
-	feishuAPIURL           = "https://open.feishu.cn/open-apis"
-	feishuAccessTokenCache = gcache.New(1).Simple().Build()
+	feishuClient = &http.Client{
+		Timeout: time.Second * 30,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Renegotiation: tls.RenegotiateFreelyAsClient,
+			},
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 5 * time.Second,
+		},
+	}
 )
 
 type Notifier struct {
@@ -32,10 +50,13 @@ type Notifier struct {
 	images     images.Provider
 	sender     receivers.WebhookSender
 	settings   Config
+	larkClient *lark.Client
 	appVersion string
 }
 
 func New(cfg Config, meta receivers.Metadata, template *templates.Template, sender receivers.WebhookSender, images images.Provider, logger logging.Logger, appVersion string) *Notifier {
+	client := lark.NewClient(cfg.AppID, cfg.AppSecret, lark.WithHttpClient(feishuClient))
+
 	return &Notifier{
 		Base:     receivers.NewBase(meta),
 		settings: cfg,
@@ -45,129 +66,74 @@ func New(cfg Config, meta receivers.Metadata, template *templates.Template, send
 		log:        logger,
 		tmpl:       template,
 		appVersion: appVersion,
+		larkClient: client,
 	}
-}
-
-type feishuImage struct {
-	Code    int64  `json:"code"`
-	Message string `json:"msg"`
-	Data    struct {
-		ImageKey string `json:"image_key"`
-	} `json:"data"`
 }
 
 // https://open.feishu.cn/document/ukTMukTMukTM/uEDO04SM4QjLxgDN
 func (fs *Notifier) uploadImage(imagePath string) (string, error) {
-	tentantAccessToken, err := fs.getTenantAccessToken()
-
-	if err != nil {
-		return "", err
-	}
-
 	image, err := os.Open(imagePath)
 	if err != nil {
 		return "", err
 	}
 	defer image.Close()
 
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("image", imagePath)
+	req := larkim.NewCreateImageReqBuilder().Body(
+		larkim.NewCreateImageReqBodyBuilder().
+			ImageType("message").
+			Image(image).
+			Build(),
+	).Build()
+
+	resp, err := fs.larkClient.Im.Image.Create(context.Background(), req)
+
 	if err != nil {
 		return "", err
 	}
 
-	if _, err = io.Copy(part, image); err != nil {
-		return "", err
+	if !resp.Success() {
+		return "", errors.New(fmt.Sprintf("logId: %s, error response: \n%s", resp.RequestId(), larkcore.Prettify(resp.CodeError)))
 	}
 
-	if err = writer.WriteField("image_type", "message"); err != nil {
-		return "", err
-	}
-
-	if err = writer.Close(); err != nil {
-		return "", err
-	}
-
-	request, err := http.NewRequest("POST", feishuAPIURL+"/image/v4/put/", body)
-	if err != nil {
-		return "", err
-	}
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tentantAccessToken))
-
-	client := http.Client{}
-	resp, err := client.Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	imageInfo := &feishuImage{}
-	err = json.Unmarshal(b, imageInfo)
-	if err != nil {
-		return "", err
-	}
-
-	return imageInfo.Data.ImageKey, nil
+	return *resp.Data.ImageKey, nil
 }
 
-type feishuTenant struct {
-	Code        int64  `json:"code"`
-	Expire      int64  `json:"expire"`
-	Message     string `json:"msg"`
-	AccessToken string `json:"tenant_access_token"`
-}
-
-// https://open.feishu.cn/document/ukTMukTMukTM/uIjNz4iM2MjLyYzM
-func (fs *Notifier) getTenantAccessToken() (string, error) {
-	k, err := feishuAccessTokenCache.Get("tentant")
-	if err == nil {
-		return k.(string), nil
+// from email / phone -> openid
+func (fs *Notifier) getUserIDs(emails []string) ([]string, error) {
+	//check email is valid, if == all return
+	for _, email := range emails {
+		if email == "all" {
+			return []string{"all"}, nil
+		}
 	}
 
-	bodyMsg, err := json.Marshal(map[string]string{
-		"app_id":     fs.settings.AppID,
-		"app_secret": fs.settings.AppSecret,
-	})
+	req := larkcontact.NewBatchGetIdUserReqBuilder().
+		UserIdType("open_id").
+		Body(
+			larkcontact.NewBatchGetIdUserReqBodyBuilder().
+				Emails(emails).
+				Build(),
+		).
+		Build()
+
+	resp, err := fs.larkClient.Contact.User.BatchGetId(context.Background(), req)
 
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	resp, err := http.Post(feishuAPIURL+"/auth/v3/tenant_access_token/internal/",
-		"application/json",
-		bytes.NewReader(bodyMsg),
-	)
-
-	if err != nil {
-		return "", err
+	if !resp.Success() {
+		return nil, errors.New(fmt.Sprintf("logId: %s, error response: \n%s", resp.RequestId(), larkcore.Prettify(resp.CodeError)))
 	}
 
-	defer resp.Body.Close()
+	//return resp.Data.UserList
+	userIds := make([]string, len(resp.Data.UserList))
 
-	b, err := io.ReadAll(resp.Body)
-
-	if err != nil {
-		return "", err
+	for idx, c := range resp.Data.UserList {
+		userIds[idx] = *c.UserId
 	}
 
-	tenantInfo := &feishuTenant{}
-
-	if err = json.Unmarshal(b, tenantInfo); err != nil {
-		return "", err
-	}
-
-	if err = feishuAccessTokenCache.SetWithExpire("tentant", tenantInfo.AccessToken, time.Duration(tenantInfo.Expire)*time.Second); err != nil {
-		return "", err
-	}
-
-	return tenantInfo.AccessToken, nil
+	return userIds, nil
 }
 
 func (fs *Notifier) Notify(ctx context.Context, as ...*types.Alert) (bool, error) {
@@ -236,6 +202,11 @@ type feishuPost struct {
 	Content []interface{} `json:"content"`
 }
 
+type feishuAt struct {
+	Tag    string `json:"tag"`
+	UserId string `json:"user_id"`
+}
+
 func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, error) {
 	var imageContents = make([]interface{}, 0)
 	_ = images.WithStoredImages(ctx, fs.log, fs.images, func(idx int, img images.Image) error {
@@ -282,8 +253,24 @@ func (fs *Notifier) buildBody(ctx context.Context, title, msg string) (string, e
 		contents = append(contents, subContents)
 	}
 
-	//if len(fs.settings.MentionUsers) > 0 {
-	//}
+	if len(fs.settings.MentionUsers) > 0 {
+
+		mentionUsers, err := fs.getUserIDs(fs.settings.MentionUsers)
+		if err != nil {
+			//not at
+		} else {
+			subContents := make([]interface{}, len(mentionUsers))
+
+			for idx, userId := range mentionUsers {
+				subContents[idx] = feishuAt{
+					Tag:    "at",
+					UserId: userId,
+				}
+			}
+
+			contents = append(contents, subContents)
+		}
+	}
 
 	post := feishuContent{
 		MessageType: "post",
