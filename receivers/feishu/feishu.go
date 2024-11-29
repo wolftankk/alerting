@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/grafana/alerting/images"
@@ -108,6 +109,7 @@ func (fs *Notifier) getUserIDs(emails []string) ([]string, error) {
 		Body(
 			larkcontact.NewBatchGetIdUserReqBodyBuilder().
 				Emails(emails).
+				Mobiles(emails).
 				Build(),
 		).
 		Build()
@@ -123,10 +125,17 @@ func (fs *Notifier) getUserIDs(emails []string) ([]string, error) {
 	}
 
 	//return resp.Data.UserList
-	userIds := make([]string, len(resp.Data.UserList))
+	userIds := make([]string, 0)
+	uniques := make(map[string]bool)
 
-	for idx, c := range resp.Data.UserList {
-		userIds[idx] = *c.UserId
+	for _, c := range resp.Data.UserList {
+		if c.UserId != nil {
+			userId := *c.UserId
+			if _, ok := uniques[userId]; !ok {
+				userIds = append(userIds, *c.UserId)
+				uniques[userId] = true
+			}
+		}
 	}
 
 	return userIds, nil
@@ -200,11 +209,6 @@ type feishuImageElement struct {
 type feishuPost struct {
 	MessageType string      `json:"msg_type"`
 	Card        *feishuCard `json:"card"`
-}
-
-type feishuMention struct {
-	Tag    string `json:"tag"`
-	UserId string `json:"user_id"`
 }
 
 func (fs *Notifier) buildBody(ctx context.Context, alerts ...*types.Alert) (string, error) {
@@ -298,20 +302,14 @@ func (fs *Notifier) buildBody(ctx context.Context, alerts ...*types.Alert) (stri
 
 		mentionUsers, err := fs.getUserIDs(fs.settings.MentionUsers)
 		if err != nil {
+			fs.log.Error("get feishu userIds error", "err", err)
 			//not at
 		} else {
-			subContents := make([]interface{}, len(mentionUsers))
-
-			for idx, userId := range mentionUsers {
-				subContents[idx] = feishuMention{
-					Tag:    "at",
-					UserId: userId,
-				}
-			}
-
-			contents = append(contents, subContents)
+			contents = append(contents, feishuPlainText{
+				Tag:     "markdown",
+				Content: fmt.Sprintf("<at ids=%s></at>", strings.Join(mentionUsers, ",")),
+			})
 		}
-
 	}
 
 	card.Elements = contents
